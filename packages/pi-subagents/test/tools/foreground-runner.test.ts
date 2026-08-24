@@ -29,6 +29,7 @@ describe("runForeground", () => {
 		expect(result.content[0].text).toContain("Agent completed");
 		expect(result.content[0].text).toContain("3 tool uses");
 		expect(result.content[0].text).toContain("All done.");
+		expect(result.content[0].text).toContain("Agent ID: agent-1");
 	});
 
 	it("marks the returned record consumed (foreground-return delivery edge)", async () => {
@@ -61,6 +62,7 @@ describe("runForeground", () => {
 		const result = await runForeground(deps.manager, makeParams(), undefined, undefined);
 		expect(result.content[0].text).toContain("Agent failed");
 		expect(result.content[0].text).toContain("Context window exceeded");
+		expect(result.content[0].text).toContain("Agent ID: agent-1");
 	});
 
 	it("returns error text when spawnAndWait throws", async () => {

@@ -170,6 +170,20 @@ describe("renderCompleted", () => {
 		expect(renderCompleted(details, "", false, theme)).toContain("[dim:  \u23BF  Done]");
 	});
 
+	it("collapsed view includes agent ID in the done line", () => {
+		const details = makeDetails({ status: "completed", durationMs: 2000, agentId: "agent-42" });
+		expect(renderCompleted(details, "", false, theme)).toContain(
+			"[dim:  \u23BF  Done (ID: agent-42)]",
+		);
+	});
+
+	it("steered done line includes agent ID", () => {
+		const details = makeDetails({ status: "steered", durationMs: 2000, agentId: "agent-42" });
+		expect(renderCompleted(details, "", false, theme)).toContain(
+			"[dim:  \u23BF  Wrapped up (turn limit) (ID: agent-42)]",
+		);
+	});
+
 	it("collapsed view shows 'Wrapped up (turn limit)' for steered", () => {
 		const details = makeDetails({ status: "steered", durationMs: 2000 });
 		expect(renderCompleted(details, "", false, theme)).toContain(
@@ -195,10 +209,18 @@ describe("renderCompleted", () => {
 		);
 	});
 
-	it("expanded view with empty result text shows no content lines", () => {
+	it("expanded view ends with the done footer including agent ID", () => {
+		const details = makeDetails({ status: "completed", durationMs: 2000, agentId: "agent-42" });
+		const result = renderCompleted(details, "line one", true, theme);
+		expect(result).toContain("[dim:  line one]");
+		expect(result).toContain("[dim:  \u23BF  Done (ID: agent-42)]");
+	});
+
+	it("expanded view with empty result text shows only the done footer", () => {
 		const details = makeDetails({ status: "completed", durationMs: 2000 });
 		const result = renderCompleted(details, "", true, theme);
-		expect(result).not.toContain("\u23BF");
+		expect(result).toContain("[dim:  \u23BF  Done]");
+		expect(result.split("\n")).toHaveLength(2);
 	});
 });
 
@@ -218,6 +240,11 @@ describe("renderStopped", () => {
 	it("shows Stopped message on second line", () => {
 		const details = makeDetails({ status: "stopped" });
 		expect(renderStopped(details, theme)).toContain("\n[dim:  \u23BF  Stopped]");
+	});
+
+	it("stopped sub-line includes agent ID when known", () => {
+		const details = makeDetails({ status: "stopped", agentId: "agent-7" });
+		expect(renderStopped(details, theme)).toContain("\n[dim:  \u23BF  Stopped (ID: agent-7)]");
 	});
 });
 
@@ -243,6 +270,20 @@ describe("renderFailed", () => {
 		const details = makeDetails({ status: "aborted" });
 		expect(renderFailed(details, theme)).toContain(
 			"[warning:  \u23BF  Aborted (max turns exceeded)]",
+		);
+	});
+
+	it("error sub-line includes agent ID when known", () => {
+		const details = makeDetails({ status: "error", error: "Out of context", agentId: "agent-7" });
+		expect(renderFailed(details, theme)).toContain(
+			"[error:  \u23BF  Error: Out of context (ID: agent-7)]",
+		);
+	});
+
+	it("aborted sub-line includes agent ID when known", () => {
+		const details = makeDetails({ status: "aborted", agentId: "agent-7" });
+		expect(renderFailed(details, theme)).toContain(
+			"[warning:  \u23BF  Aborted (max turns exceeded) (ID: agent-7)]",
 		);
 	});
 });

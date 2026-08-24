@@ -117,14 +117,16 @@ export async function runForeground(
     : "";
 
   if (record.status === "error") {
-    return textResult(`${fallbackNote}Agent failed: ${record.error}`, details);
+    return textResult(`${fallbackNote}Agent failed: ${record.error}\nAgent ID: ${record.id}`, details);
   }
 
   const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
   const statsParts = [`${record.toolUses} tool uses`];
   if (tokenText) statsParts.push(tokenText);
+  // Hand back the agent ID like the background path, so the parent can still
+  // reference this agent (get_subagent_result / steer_subagent / resume).
   return textResult(
-    `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
+    `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\nAgent ID: ${record.id}\n\n` +
       (record.result?.trim() ?? "No output."),
     details,
   );

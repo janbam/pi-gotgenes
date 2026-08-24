@@ -60,25 +60,26 @@ export function renderCompleted(
 	let line = icon + (s ? " " + s : "");
 	line += " " + theme.fg("dim", "\u00B7") + " " + theme.fg("dim", duration);
 
-	if (expanded) {
-		if (resultText) {
-			const lines = resultText.split("\n").slice(0, 50);
-			for (const l of lines) {
-				line += "\n" + theme.fg("dim", `  ${l}`);
-			}
-			if (resultText.split("\n").length > 50) {
-				line +=
-					"\n" +
-					theme.fg(
-						"muted",
-						"  ... (use get_subagent_result with verbose for full output)",
-					);
-			}
+	const doneText = isSteered ? "Wrapped up (turn limit)" : "Done";
+	const doneLine = theme.fg("dim", `  ${GLYPHS.subLine}  ${doneText}${idSuffix(details)}`);
+
+	if (expanded && resultText) {
+		const lines = resultText.split("\n").slice(0, 50);
+		for (const l of lines) {
+			line += "\n" + theme.fg("dim", `  ${l}`);
 		}
-	} else {
-		const doneText = isSteered ? "Wrapped up (turn limit)" : "Done";
-		line += "\n" + theme.fg("dim", `  ${GLYPHS.subLine}  ${doneText}`);
+		if (resultText.split("\n").length > 50) {
+			line +=
+				"\n" +
+				theme.fg(
+					"muted",
+					"  ... (use get_subagent_result with verbose for full output)",
+				);
+		}
 	}
+	// Done footer in both views — carries the agent ID so a completed result
+	// stays referenceable, mirroring the background launch line.
+	line += "\n" + doneLine;
 	return line;
 }
 
@@ -86,7 +87,7 @@ export function renderCompleted(
 export function renderStopped(details: AgentDetails, theme: Theme): string {
 	const s = renderStats(details, theme);
 	let line = theme.fg("dim", GLYPHS.stopped) + (s ? " " + s : "");
-	line += "\n" + theme.fg("dim", `  ${GLYPHS.subLine}  Stopped`);
+	line += "\n" + theme.fg("dim", `  ${GLYPHS.subLine}  Stopped${idSuffix(details)}`);
 	return line;
 }
 
@@ -98,16 +99,21 @@ export function renderFailed(details: AgentDetails, theme: Theme): string {
 	if (details.status === "error") {
 		line +=
 			"\n" +
-			theme.fg("error", `  ${GLYPHS.subLine}  Error: ${details.error ?? "unknown"}`);
+			theme.fg("error", `  ${GLYPHS.subLine}  Error: ${details.error ?? "unknown"}${idSuffix(details)}`);
 	} else {
 		line +=
 			"\n" +
-			theme.fg("warning", `  ${GLYPHS.subLine}  Aborted (max turns exceeded)`);
+			theme.fg("warning", `  ${GLYPHS.subLine}  Aborted (max turns exceeded)${idSuffix(details)}`);
 	}
 	return line;
 }
 
 // ---- Shared helper ----
+
+/** " (ID: …)" suffix for terminal result sub-lines; empty when the ID is unknown. */
+function idSuffix(details: AgentDetails): string {
+	return details.agentId ? ` (ID: ${details.agentId})` : "";
+}
 
 /**
  * Build the stats string: "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k token".
