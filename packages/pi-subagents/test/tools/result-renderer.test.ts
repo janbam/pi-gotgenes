@@ -213,7 +213,7 @@ describe("renderCompleted", () => {
 		const details = makeDetails({ status: "completed", durationMs: 2000, agentId: "agent-42" });
 		const result = renderCompleted(details, "line one", true, theme);
 		expect(result).toContain("[dim:  line one]");
-		expect(result).toContain("[dim:  \u23BF  Done (ID: agent-42)]");
+		expect(result.split("\n").at(-1)).toBe("[dim:  \u23BF  Done (ID: agent-42)]");
 	});
 
 	it("expanded view with empty result text shows only the done footer", () => {
