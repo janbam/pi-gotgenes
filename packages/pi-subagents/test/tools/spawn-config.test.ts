@@ -27,6 +27,11 @@ function makeDisabledPlanRegistry(): AgentTypeRegistry {
 /** Minimal registry with default agents only. */
 const testRegistry = new AgentTypeRegistry(() => new Map());
 
+/** Registry adding a plain replace-mode agent (no thinking) to the defaults. */
+const plainReplaceRegistry = new AgentTypeRegistry(
+  () => new Map([["plain", makeAgentConfig({ name: "plain" })]]),
+);
+
 /** Shorthand for building ModelInfo. */
 function makeModelInfo(overrides: Partial<Parameters<typeof resolveSpawnConfig>[2]> = {}) {
   return {
@@ -241,8 +246,8 @@ describe("resolveSpawnConfig — detailBase and tags", () => {
       defaultSettings,
     );
     if ("error" in result) return;
-    // Explore has promptMode: "replace" → no mode label, no invocation overrides
-    expect(result.presentation.agentTags).toEqual([]);
+    // Explore is replace-mode → no "twin" label (its configured thinking contributes its own tag)
+    expect(result.presentation.agentTags).not.toContain("twin");
   });
 
   it("includes twin tag for append-mode agents like general-purpose", () => {
@@ -259,13 +264,13 @@ describe("resolveSpawnConfig — detailBase and tags", () => {
 
   it("sets tags to undefined on detailBase for replace-mode agents with no invocation overrides", () => {
     const result = resolveSpawnConfig(
-      { subagent_type: "Explore", prompt: "test", description: "d" },
-      testRegistry,
+      { subagent_type: "plain", prompt: "test", description: "d" },
+      plainReplaceRegistry,
       makeModelInfo(),
       defaultSettings,
     );
     if ("error" in result) return;
-    // Explore has promptMode: "replace" and no invocation overrides → no tags
+    // plain is replace-mode with no thinking and no invocation overrides → no tags
     expect(result.presentation.detailBase.tags).toBeUndefined();
   });
 });
