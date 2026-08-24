@@ -55,3 +55,7 @@ vite.config.ts.timestamp-*
 .devenv*
 .direnv
 result
+
+# Backups
+
+.pi.bak/
