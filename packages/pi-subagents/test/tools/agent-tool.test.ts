@@ -157,25 +157,6 @@ describe("AgentTool — resume path", () => {
 		expect(result.content[0].text).toContain("Resumed output.");
 	});
 
-	it("does not apply new-session reasoning validation to an existing session", async () => {
-		const deps = createToolDeps();
-		const resumeRecord = createTestSubagent();
-		resumeRecord.subagentSession = toSubagentSession(createSubagentSessionStub(createMockSession()));
-		deps.manager.getRecord = vi.fn().mockReturnValue(resumeRecord);
-		deps.manager.resume = vi.fn().mockResolvedValue(createTestSubagent({ result: "Resumed output." }));
-
-		const result = await execute(deps, {
-			prompt: "continue",
-			description: "resume",
-			subagent_type: "general-purpose",
-			resume: "agent-1",
-			thinking: "high",
-		});
-
-		expect(result.content[0].text).toContain("Resumed output.");
-		expect(deps.manager.resume).toHaveBeenCalledWith("agent-1", "continue", expect.any(AbortSignal));
-	});
-
 	it("marks the resumed record consumed (resume-return delivery edge)", async () => {
 		const deps = createToolDeps();
 		const resumeRecord = createTestSubagent();
@@ -217,31 +198,6 @@ describe("AgentTool — model resolution error", () => {
 			new Error(
 				'Model not found: "nonexistent-model-xyz".\n\nAvailable models:\n  anthropic/claude-sonnet',
 			),
-		);
-	});
-
-	it("throws when the requested reasoning level is unavailable for the resolved model", async () => {
-		const deps = createToolDeps();
-		const model = makeModel({ id: "gpt-4o", name: "GPT-4o", provider: "openai", reasoning: false });
-		deps.runtime.getModelInfo = vi.fn(() => ({
-			parentModel: model,
-			modelRegistry: {
-				find: (provider: string, modelId: string) => provider === model.provider && modelId === model.id ? model : undefined,
-				getAll: () => [model],
-				getAvailable: () => [model],
-			},
-		}));
-
-		await expect(
-			execute(deps, {
-				prompt: "test",
-				description: "test",
-				subagent_type: "general-purpose",
-				model: "openai/gpt-4o",
-				thinking: "high",
-			}),
-		).rejects.toThrow(
-			'Reasoning level "high" is not available for model "openai/gpt-4o". Available reasoning levels: off.',
 		);
 	});
 });

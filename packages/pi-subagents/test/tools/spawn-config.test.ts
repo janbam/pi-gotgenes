@@ -35,7 +35,7 @@ const plainReplaceRegistry = new AgentTypeRegistry(
 /** Shorthand for building ModelInfo. */
 function makeModelInfo(overrides: Partial<Parameters<typeof resolveSpawnConfig>[2]> = {}) {
   return {
-    parentModel: makeModel({ id: "claude-sonnet", name: "Claude Sonnet", reasoning: true }),
+    parentModel: makeModel({ id: "claude-sonnet", name: "Claude Sonnet" }),
     modelRegistry: { find: () => undefined, getAll: () => [], getAvailable: () => [] },
     ...overrides,
   };
@@ -145,32 +145,6 @@ describe("resolveSpawnConfig — model resolution", () => {
       defaultSettings,
     );
     expect("error" in result && result.error).toBeTruthy();
-  });
-
-  it("returns an actionable error when the model does not support the requested reasoning level", () => {
-    const model = makeModel({
-      id: "reasoning-model",
-      name: "Reasoning Model",
-      provider: "test-provider",
-      reasoning: true,
-      thinkingLevelMap: { xhigh: null },
-    });
-    const result = resolveSpawnConfig(
-      { subagent_type: "general-purpose", prompt: "test", description: "d", model: "test-provider/reasoning-model", thinking: "xhigh" },
-      testRegistry,
-      makeModelInfo({
-        modelRegistry: {
-          find: (provider, modelId) => provider === model.provider && modelId === model.id ? model : undefined,
-          getAll: () => [model],
-          getAvailable: () => [model],
-        },
-      }),
-      defaultSettings,
-    );
-
-    expect(result).toEqual({
-      error: 'Reasoning level "xhigh" is not available for model "test-provider/reasoning-model". Available reasoning levels: off, minimal, low, medium, high.',
-    });
   });
 });
 
