@@ -14,7 +14,7 @@
 
 import { buildSessionContext, parseSessionEntries, type SessionEntry, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AgentConfigLookup } from "#src/config/agent-types";
-import { isRunningStatus, type SubagentStatus } from "#src/lifecycle/subagent-state";
+import { isActiveStatus, isRunningStatus, type SubagentStatus } from "#src/lifecycle/subagent-state";
 import type { AgentSessionEvent, SessionMessage, SubagentType } from "#src/types";
 import { formatDuration, getDisplayName } from "#src/ui/display";
 
@@ -140,6 +140,15 @@ export function liveSource(record: NavigableSubagent): TranscriptSource {
         : undefined,
     getToolDefinition: (name) => record.getToolDefinition(name),
   };
+}
+
+/**
+ * Whether the navigator can still abort this entry's agent: a live record
+ * that is running or queued. Snapshot entries point at released sessions —
+ * there is nothing left to abort.
+ */
+export function isAbortableEntry(entry: NavigationEntry): boolean {
+  return entry.kind === "live" && isActiveStatus(entry.record.status);
 }
 
 function buildLabel(fields: LabelFields, registry: AgentConfigLookup, released = false): string {
