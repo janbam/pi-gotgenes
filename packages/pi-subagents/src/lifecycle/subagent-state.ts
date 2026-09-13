@@ -80,6 +80,24 @@ export interface SubagentStateInit {
 	responseText?: string;
 }
 
+/** Serializable state retained by the parent registry between Pi processes. */
+export interface SubagentStateSnapshot {
+	status: SubagentStatus;
+	result?: string;
+	pendingQuestion?: string;
+	workspaceNotice?: string;
+	error?: string;
+	stoppedWhileQueued?: boolean;
+	startedAt: number;
+	completedAt?: number;
+	consumedAt?: number;
+	toolUses: number;
+	lifetimeUsage: LifetimeUsage;
+	compactionCount: number;
+	turnCount: number;
+	responseText: string;
+}
+
 export class SubagentState {
 	// Transition state — encapsulated behind getters, mutated only via transition methods
 	private _status: SubagentStatus;
@@ -185,6 +203,40 @@ export class SubagentState {
 		for (const name of init.activeTools ?? []) {
 			this.addActiveTool(name);
 		}
+	}
+
+	/** Restore persisted state, converting interrupted process-local work into a settled record. */
+	static restore(snapshot: SubagentStateSnapshot, recoveredAt = Date.now()): SubagentState {
+		const interrupted = isActiveStatus(snapshot.status);
+		return new SubagentState({
+			...snapshot,
+			status: interrupted ? "stopped" : snapshot.status,
+			completedAt: interrupted ? recoveredAt : snapshot.completedAt,
+			stoppedWhileQueued:
+				snapshot.status === "queued" ? true : snapshot.stoppedWhileQueued,
+			// Live presentation belongs to the dead process, not the durable conversation.
+			responseText: interrupted ? "" : snapshot.responseText,
+		});
+	}
+
+	/** Capture the durable lifecycle and observation fields without transient carrier ownership. */
+	snapshot(): SubagentStateSnapshot {
+		return {
+			status: this._status,
+			result: this._result,
+			pendingQuestion: this._pendingQuestion,
+			workspaceNotice: this._workspaceNotice,
+			error: this._error,
+			stoppedWhileQueued: this._stoppedWhileQueued,
+			startedAt: this._startedAt,
+			completedAt: this._completedAt,
+			consumedAt: this._consumedAt,
+			toolUses: this._toolUses,
+			lifetimeUsage: { ...this._lifetimeUsage },
+			compactionCount: this._compactionCount,
+			turnCount: this._turnCount,
+			responseText: this._responseText,
+		};
 	}
 
 	/** Running or queued — still live. */
