@@ -177,6 +177,25 @@ export interface CreateSubagentSessionParams {
   notifyParent?: UpdateAnnouncer;
 }
 
+/** Fully resolved collaborators shared by fresh creation and durable reopening. */
+interface ActivateSubagentSessionParams {
+  type: SubagentType;
+  parentSessionId: string | undefined;
+  parentContext: string | undefined;
+  sessionDir: string;
+  sessionManager: SessionManagerLike;
+  sessionSettings: SettingsManager;
+  modelRegistry: ModelRegistry;
+  model: Model<any> | undefined;
+  toolNames: string[];
+  childTools: ToolDefinition[];
+  loader: ResourceLoaderLike;
+  thinkingLevel: ThinkingLevel | undefined;
+  agentMaxTurns: number | undefined;
+  effectiveCwd: string;
+  agentDir: string;
+}
+
 /**
  * The core's own child-facing tools, built for whichever callbacks this run
  * supplied. An agent's `tools:` list is its complete capability allowlist, so
@@ -259,30 +278,60 @@ export async function createSubagentSession(
   const sessionDir = deps.io.deriveSessionDir(params.parentSession?.parentSessionFile, cfg.effectiveCwd);
   const sessionManager = deps.io.createSessionManager(cfg.effectiveCwd, sessionDir);
   sessionManager.newSession({ parentSession: params.parentSession?.parentSessionId });
-  const sessionId = sessionManager.getSessionId();
 
   const childTools = buildChildTools(params);
+  return activateSubagentSession(
+    {
+      type,
+      parentSessionId,
+      parentContext: snapshot.parentContext,
+      sessionDir,
+      sessionManager,
+      sessionSettings,
+      modelRegistry: snapshot.modelRegistry,
+      model: cfg.model,
+      toolNames: cfg.toolNames,
+      childTools,
+      loader,
+      thinkingLevel: cfg.thinkingLevel,
+      agentMaxTurns: cfg.agentMaxTurns,
+      effectiveCwd: cfg.effectiveCwd,
+      agentDir,
+    },
+    deps,
+  );
+}
+
+/** Activate, bind, and publish one child whose session manager is already selected. */
+async function activateSubagentSession(
+  params: ActivateSubagentSessionParams,
+  deps: SubagentSessionDeps,
+): Promise<SubagentSession> {
+  const sessionId = params.sessionManager.getSessionId();
+
+  // Keep child protocol tools inside both the allowlist and custom definitions;
+  // the SDK drops a custom tool whose name is absent from the allowlist.
   const { session } = await deps.io.createSession({
-    cwd: cfg.effectiveCwd,
-    agentDir,
-    sessionManager,
-    settingsManager: sessionSettings,
-    modelRegistry: snapshot.modelRegistry,
-    model: cfg.model,
-    tools: [...cfg.toolNames, ...childTools.map((tool) => tool.name)],
-    customTools: childTools,
+    cwd: params.effectiveCwd,
+    agentDir: params.agentDir,
+    sessionManager: params.sessionManager,
+    settingsManager: params.sessionSettings,
+    modelRegistry: params.modelRegistry,
+    model: params.model,
+    tools: [...params.toolNames, ...params.childTools.map((tool) => tool.name)],
+    customTools: params.childTools,
     excludeTools: EXCLUDED_TOOL_NAMES,
-    resourceLoader: loader,
-    thinkingLevel: cfg.thinkingLevel,
+    resourceLoader: params.loader,
+    thinkingLevel: params.thinkingLevel,
   });
 
   const subagentSession = new SubagentSession(session, {
-    outputFile: sessionManager.getSessionFile(),
+    outputFile: params.sessionManager.getSessionFile(),
     sessionId,
-    sessionDir,
-    agentName: type,
-    agentMaxTurns: cfg.agentMaxTurns,
-    parentContext: snapshot.parentContext,
+    sessionDir: params.sessionDir,
+    agentName: params.type,
+    agentMaxTurns: params.agentMaxTurns,
+    parentContext: params.parentContext,
     lifecycle: deps.lifecycle,
   });
 
@@ -291,7 +340,7 @@ export async function createSubagentSession(
   // entry in place for the first permission check during child extension
   // initialization. The event bus dispatches synchronously, so a synchronous
   // subscriber completes before this returns.
-  deps.lifecycle.sessionCreated({ sessionId, parentSessionId });
+  deps.lifecycle.sessionCreated({ sessionId, parentSessionId: params.parentSessionId });
 
   try {
     // Bind extensions so that session_start fires and extensions can initialize.
@@ -307,7 +356,7 @@ export async function createSubagentSession(
   // Every child session_start handler has now run, so this is the first — and
   // only — moment a parent can observe what the child's extensions installed.
   // Deliberately outside the try above: a child whose binding threw never ran.
-  deps.lifecycle.bound({ sessionId, parentSessionId });
+  deps.lifecycle.bound({ sessionId, parentSessionId: params.parentSessionId });
 
   return subagentSession;
 }
