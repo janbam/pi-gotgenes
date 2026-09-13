@@ -6,7 +6,7 @@
  * tag building, and detail-base construction.
  */
 
-import type { Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import type { AgentTypeRegistry } from "#src/config/agent-types";
 import { resolveAgentInvocationConfig } from "#src/config/invocation-config";
 import { normalizeMaxTurns } from "#src/lifecycle/turn-limits";
@@ -105,6 +105,19 @@ export function resolveSpawnConfig(
   const model = resolution.model;
 
   const thinking = resolvedConfig.thinking;
+
+  // New sessions must honor the requested level exactly instead of letting the
+  // SDK clamp it. Resumes reuse their existing session and ignore spawn config.
+  if (!params.resume && model && thinking !== undefined) {
+    const supportedLevels = getSupportedThinkingLevels(model);
+    if (!supportedLevels.includes(thinking)) {
+      const available = supportedLevels.join(", ") || "none";
+      return {
+        error: `Reasoning level "${thinking}" is not available for model "${model.provider}/${model.id}". Available reasoning levels: ${available}.`,
+      };
+    }
+  }
+
   const inheritContext = resolvedConfig.inheritContext;
   const runInBackground = resolvedConfig.runInBackground;
 

@@ -73,7 +73,9 @@ export class AgentTool {
 			this.runtime.getModelInfo(),
 			this.settings,
 		);
-		if ("error" in config) return textResult(config.error);
+		// Throw configuration failures so Pi marks the tool result as an error
+		// and carries the reason through every tool-call adapter.
+		if ("error" in config) throw new Error(config.error);
 
 		// ---- Boundary extraction (after config so inheritContext is resolved) ----
 		const snapshot = this.runtime.buildSnapshot(config.execution.inheritContext);
