@@ -17,6 +17,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import { emitChildSessionShutdown } from "#src/lifecycle/child-shutdown";
+import type { PersistedSubagentSession } from "#src/lifecycle/subagent-persistence";
 import { normalizeMaxTurns } from "#src/lifecycle/turn-limits";
 import { getSessionContextPercent, type SessionStatsLike } from "#src/lifecycle/usage";
 import { extractText } from "#src/session/context";
@@ -56,6 +57,8 @@ export interface SubagentSessionMeta {
   agentMaxTurns: number | undefined;
   /** Parent context prepended to the run prompt, captured at spawn time. */
   parentContext: string | undefined;
+  /** Exact effective inputs that can activate this persisted child again. */
+  resumeSpec?: PersistedSubagentSession;
   lifecycle: ChildLifecyclePublisher;
 }
 
@@ -93,6 +96,11 @@ export class SubagentSession {
 
   get outputFile(): string | undefined {
     return this.meta.outputFile;
+  }
+
+  /** Immutable effective session inputs retained by the parent registry. */
+  get resumeSpec(): PersistedSubagentSession | undefined {
+    return this.meta.resumeSpec;
   }
 
   /** Drive the initial run's turn loop; emits `completed` on success. */

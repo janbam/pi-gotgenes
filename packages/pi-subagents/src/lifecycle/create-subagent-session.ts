@@ -21,6 +21,7 @@ import {
 import type { AgentConfigLookup } from "#src/config/agent-types";
 import type { ChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
+import type { PersistedSubagentSession } from "#src/lifecycle/subagent-persistence";
 import { SubagentSession } from "#src/lifecycle/subagent-session";
 import { AskParentTool, type QuestionRecorder } from "#src/session/ask-parent-tool";
 import type { EnvInfo } from "#src/session/env";
@@ -115,6 +116,12 @@ export interface EnvironmentIO {
 export interface SessionFactoryIO {
   createResourceLoader: (opts: ResourceLoaderOptions) => ResourceLoaderLike;
   createSessionManager: (cwd: string, sessionDir: string) => SessionManagerLike;
+  openSessionManager: (
+    outputFile: string,
+    sessionDir: string,
+    cwdOverride: string,
+  ) => SessionManagerLike;
+  fileExists: (path: string) => boolean;
   createSettingsManager: (cwd: string, agentDir: string) => SettingsManager;
   /**
    * Settings view the child's resource loader resolves packages from.
@@ -177,6 +184,28 @@ export interface CreateSubagentSessionParams {
   notifyParent?: UpdateAnnouncer;
 }
 
+/** Parameters for activating a child conversation already persisted on disk. */
+export interface RestoreSubagentSessionParams {
+  spec: PersistedSubagentSession;
+  type: SubagentType;
+  modelRegistry: ModelRegistry;
+  parentSessionId?: string;
+  askParent?: QuestionRecorder;
+  notifyParent?: UpdateAnnouncer;
+}
+
+/** Stable classification used by the manager's durable resume refusal. */
+export class SubagentSessionRestoreError extends Error {
+  constructor(
+    readonly reason: "unavailable" | "incompatible",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "SubagentSessionRestoreError";
+  }
+}
+
 /** Fully resolved collaborators shared by fresh creation and durable reopening. */
 interface ActivateSubagentSessionParams {
   type: SubagentType;
@@ -194,6 +223,14 @@ interface ActivateSubagentSessionParams {
   agentMaxTurns: number | undefined;
   effectiveCwd: string;
   agentDir: string;
+  resumeSpec: PersistedSubagentSession | undefined;
+}
+
+/** Settings and resource-loader objects shared by fresh and reopened children. */
+interface SessionResources {
+  agentDir: string;
+  sessionSettings: SettingsManager;
+  loader: ResourceLoaderLike;
 }
 
 /**
@@ -203,7 +240,9 @@ interface ActivateSubagentSessionParams {
  * core installs in every child, and neither reaches the filesystem, the shell,
  * or the network.
  */
-function buildChildTools(params: CreateSubagentSessionParams): ToolDefinition[] {
+function buildChildTools(
+  params: Pick<CreateSubagentSessionParams, "askParent" | "notifyParent">,
+): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
   if (params.askParent) tools.push(new AskParentTool(params.askParent).toToolDefinition());
   if (params.notifyParent)
@@ -248,29 +287,11 @@ export async function createSubagentSession(
     deps.io.assemblerIO,
   );
 
-  const agentDir = deps.io.getAgentDir();
-  const sessionSettings = deps.io.createSettingsManager(cfg.effectiveCwd, agentDir);
-  const loaderSettings = deps.io.createLoaderSettingsManager(sessionSettings);
-
-  // Children inherit the parent's skills and every extension the composition
-  // root did not exclude (#696).
-  //
-  // Suppress AGENTS.md/CLAUDE.md and APPEND_SYSTEM.md - upstream's
-  // buildSystemPrompt() re-appends both AFTER systemPromptOverride, which
-  // would defeat prompt_mode: replace. Parent context, if wanted, reaches the
-  // subagent via prompt_mode: append (parentSystemPrompt is embedded in
-  // systemPromptOverride) or inherit_context (conversation).
-  const loader = deps.io.createResourceLoader({
-    cwd: cfg.effectiveCwd,
-    agentDir,
-    settingsManager: loaderSettings,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-    systemPromptOverride: () => cfg.systemPrompt,
-    appendSystemPromptOverride: () => [],
-  });
-  await loader.reload();
+  const resources = await loadSessionResources(
+    cfg.effectiveCwd,
+    cfg.systemPrompt,
+    deps,
+  );
 
   // Create a persisted SessionManager so transcripts are written in Pi's
   // official JSONL format. Falls back to a temp directory when the parent
@@ -280,6 +301,23 @@ export async function createSubagentSession(
   sessionManager.newSession({ parentSession: params.parentSession?.parentSessionId });
 
   const childTools = buildChildTools(params);
+  const outputFile = sessionManager.getSessionFile();
+  const resumeSpec: PersistedSubagentSession | undefined = outputFile
+    ? {
+        outputFile,
+        sessionId: sessionManager.getSessionId(),
+        sessionDir,
+        effectiveCwd: cfg.effectiveCwd,
+        systemPrompt: cfg.systemPrompt,
+        toolNames: [...cfg.toolNames],
+        model: cfg.model
+          ? { provider: cfg.model.provider, id: cfg.model.id }
+          : undefined,
+        thinkingLevel: cfg.thinkingLevel,
+        agentMaxTurns: cfg.agentMaxTurns,
+        parentContext: snapshot.parentContext,
+      }
+    : undefined;
   return activateSubagentSession(
     {
       type,
@@ -287,18 +325,131 @@ export async function createSubagentSession(
       parentContext: snapshot.parentContext,
       sessionDir,
       sessionManager,
-      sessionSettings,
+      sessionSettings: resources.sessionSettings,
       modelRegistry: snapshot.modelRegistry,
       model: cfg.model,
       toolNames: cfg.toolNames,
       childTools,
-      loader,
+      loader: resources.loader,
       thinkingLevel: cfg.thinkingLevel,
       agentMaxTurns: cfg.agentMaxTurns,
       effectiveCwd: cfg.effectiveCwd,
-      agentDir,
+      agentDir: resources.agentDir,
+      resumeSpec,
     },
     deps,
+  );
+}
+
+/** Reopen one persisted child conversation with its exact effective configuration. */
+export async function restoreSubagentSession(
+  params: RestoreSubagentSessionParams,
+  deps: SubagentSessionDeps,
+): Promise<SubagentSession> {
+  const { spec } = params;
+  if (!deps.io.fileExists(spec.outputFile)) {
+    throw new SubagentSessionRestoreError(
+      "unavailable",
+      `Child transcript is missing: ${spec.outputFile}`,
+    );
+  }
+
+  // Resolve exact identity only; fuzzy fallback could silently continue with a
+  // different model after a registry or provider configuration change.
+  const model = resolvePersistedModel(spec, params.modelRegistry);
+  const resources = await loadSessionResources(
+    spec.effectiveCwd,
+    spec.systemPrompt,
+    deps,
+  );
+
+  let sessionManager: SessionManagerLike;
+  try {
+    sessionManager = deps.io.openSessionManager(
+      spec.outputFile,
+      spec.sessionDir,
+      spec.effectiveCwd,
+    );
+  } catch (cause) {
+    throw new SubagentSessionRestoreError(
+      "incompatible",
+      `Child transcript cannot be opened: ${spec.outputFile}`,
+      { cause },
+    );
+  }
+  if (sessionManager.getSessionId() !== spec.sessionId) {
+    throw new SubagentSessionRestoreError(
+      "incompatible",
+      `Child transcript identity changed: expected ${spec.sessionId}`,
+    );
+  }
+
+  return activateSubagentSession(
+    {
+      type: params.type,
+      parentSessionId: params.parentSessionId,
+      parentContext: spec.parentContext,
+      sessionDir: spec.sessionDir,
+      sessionManager,
+      sessionSettings: resources.sessionSettings,
+      modelRegistry: params.modelRegistry,
+      model,
+      toolNames: [...spec.toolNames],
+      childTools: buildChildTools(params),
+      loader: resources.loader,
+      thinkingLevel: spec.thinkingLevel,
+      agentMaxTurns: spec.agentMaxTurns,
+      effectiveCwd: spec.effectiveCwd,
+      agentDir: resources.agentDir,
+      resumeSpec: spec,
+    },
+    deps,
+  );
+}
+
+/** Build settings and load the exact persisted system prompt for one child. */
+async function loadSessionResources(
+  effectiveCwd: string,
+  systemPrompt: string,
+  deps: SubagentSessionDeps,
+): Promise<SessionResources> {
+  const agentDir = deps.io.getAgentDir();
+  const sessionSettings = deps.io.createSettingsManager(effectiveCwd, agentDir);
+  const loaderSettings = deps.io.createLoaderSettingsManager(sessionSettings);
+
+  // Children inherit the parent's skills and every extension the composition
+  // root did not exclude (#696). Context files stay suppressed because the
+  // effective prompt already contains the selected inheritance policy.
+  const loader = deps.io.createResourceLoader({
+    cwd: effectiveCwd,
+    agentDir,
+    settingsManager: loaderSettings,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    systemPromptOverride: () => systemPrompt,
+    appendSystemPromptOverride: () => [],
+  });
+  await loader.reload();
+  return { agentDir, sessionSettings, loader };
+}
+
+/** Resolve a persisted exact model or reject an environment that cannot honor it. */
+function resolvePersistedModel(
+  spec: PersistedSubagentSession,
+  registry: ModelRegistry,
+): Model<any> | undefined {
+  if (!spec.model) return undefined;
+  const model = registry.find(spec.model.provider, spec.model.id);
+  const available = registry.getAvailable?.() ?? registry.getAll();
+  const isAvailable = available.some(
+    (candidate) =>
+      candidate.provider === spec.model?.provider && candidate.id === spec.model.id,
+  );
+  if (model && isAvailable) return model;
+  throw new SubagentSessionRestoreError(
+    "incompatible",
+    `Persisted model is unavailable: ${spec.model.provider}/${spec.model.id}`,
   );
 }
 
@@ -332,6 +483,7 @@ async function activateSubagentSession(
     agentName: params.type,
     agentMaxTurns: params.agentMaxTurns,
     parentContext: params.parentContext,
+    resumeSpec: params.resumeSpec,
     lifecycle: deps.lifecycle,
   });
 
