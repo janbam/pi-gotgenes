@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentTypeRegistry } from "#src/config/agent-types";
 import type { AgentSessionEvent, SessionMessage } from "#src/types";
-import { fileSnapshotSource, listNavigableAgents, liveSource, type NavigableSubagent, type TranscriptSource } from "#src/ui/session-navigation";
+import { fileSnapshotSource, isAbortableEntry, listNavigableAgents, liveSource, type NavigableSubagent, type TranscriptSource } from "#src/ui/session-navigation";
 import { makeNavigable } from "#test/helpers/make-navigable";
 
 const registry = new AgentTypeRegistry(() => new Map());
@@ -135,5 +135,26 @@ describe("fileSnapshotSource", () => {
     const headerOnly = JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: "2026-06-23T00:00:00Z", cwd: "/proj" });
     const source = fileSnapshotSource("/tasks/empty.jsonl", () => headerOnly);
     expect(source.getMessages()).toEqual([]);
+  });
+});
+
+describe("isAbortableEntry", () => {
+  it("is true for live running and queued agents", () => {
+    for (const status of ["running", "queued"] as const) {
+      const [entry] = listNavigableAgents([makeNavigable({ id: "live", status })], registry);
+      expect(isAbortableEntry(entry)).toBe(true);
+    }
+  });
+
+  it("is false for settled live agents", () => {
+    const [entry] = listNavigableAgents([makeNavigable({ id: "done", status: "completed" })], registry);
+    expect(isAbortableEntry(entry)).toBe(false);
+  });
+
+  it("is false for snapshot entries — released sessions have nothing left to abort", () => {
+    const released = makeNavigable({ id: "released", status: "aborted", isSessionReady: () => false, outputFile: "/tasks/r.jsonl" });
+    const [entry] = listNavigableAgents([released], registry);
+    expect(entry.kind).toBe("snapshot");
+    expect(isAbortableEntry(entry)).toBe(false);
   });
 });
