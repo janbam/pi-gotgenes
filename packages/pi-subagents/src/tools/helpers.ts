@@ -2,20 +2,6 @@ import type { AgentConfigLookup } from "#src/config/agent-types";
 import { getLifetimeTotal, type LifetimeUsage } from "#src/lifecycle/usage";
 import { type AgentDetails, formatTokens } from "#src/ui/display";
 
-/** Parenthetical status note for completed agent result text. */
-export function getStatusNote(status: string): string {
-  switch (status) {
-    case "aborted":
-      return " (aborted \u2014 max turns exceeded, output may be incomplete)";
-    case "steered":
-      return " (wrapped up \u2014 reached turn limit)";
-    case "stopped":
-      return " (stopped by user)";
-    default:
-      return "";
-  }
-}
-
 /** Build AgentDetails from a base + record-specific fields. */
 export function buildDetails(
   base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
@@ -47,8 +33,19 @@ export function buildDetails(
   };
 }
 
-/** Tool execute return value for a text response. */
-export function textResult(msg: string, details?: AgentDetails) {
+/** Render a spawn's advisories as the prefix a result's leading line follows, or "" when there are none. */
+export function renderSpawnNotes(notes: readonly string[]): string {
+  return notes.length > 0 ? `${notes.join("\n")}\n\n` : "";
+}
+
+/**
+ * Tool execute return value for a text response.
+ *
+ * Generic over the details payload so a tool with its own presentation metadata
+ * can attach it; defaults to `AgentDetails`, which is what every subagent-tool
+ * call site passes.
+ */
+export function textResult<T = AgentDetails>(msg: string, details?: T) {
   return { content: [{ type: "text" as const, text: msg }], details };
 }
 

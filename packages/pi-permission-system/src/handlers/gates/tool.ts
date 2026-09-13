@@ -8,10 +8,10 @@ import {
 import {
   suggestPathSessionPattern,
   suggestSessionPattern,
-} from "#src/pattern-suggest";
+} from "#src/presentation/pattern-suggest";
 import { buildToolAskPayload } from "#src/presentation/tool-ask-payload";
-import { SessionApproval } from "#src/session-approval";
-import type { ToolPreviewFormatter } from "#src/tool-preview-formatter";
+import { SessionApproval } from "#src/session/session-approval";
+import type { ToolPreviewFormatter } from "#src/tool-input/tool-preview-formatter";
 import type { PermissionCheckResult } from "#src/types";
 import type { GateDescriptor } from "./descriptor";
 import {
@@ -132,10 +132,32 @@ export function describeToolGate(
       toolCallId: tcc.toolCallId,
       toolName: tcc.toolName,
       ...permissionLogContext,
+      ...floorExemptionFact(check),
     },
     decision: {
       surface: gateSurface,
       value: decisionValue,
     },
   };
+}
+
+/**
+ * Why a bash wrapper's floor did not apply, when one did not (#803).
+ *
+ * The blame line ADR 0013 §11 asks the review log to record: `matchedPattern`
+ * names the rule that decided and `executedUnit` the command it decided about,
+ * and this names why that rule was consulted instead of the floor. Absent for
+ * every other decision, so a line states what was true rather than enumerating
+ * what was not.
+ *
+ * It rides the gate's `logContext` rather than the prompt payload because an
+ * exempt unit's usual outcome is that no prompt happens at all — the same
+ * routing `effect`/`effectSource` take on the bash path gates.
+ */
+function floorExemptionFact(
+  check: PermissionCheckResult,
+): Record<string, unknown> {
+  return check.floorExemption === undefined
+    ? {}
+    : { floorExemption: check.floorExemption };
 }

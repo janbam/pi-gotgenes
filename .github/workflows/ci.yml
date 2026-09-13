@@ -9,13 +9,13 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -35,7 +35,7 @@ jobs:
         run: pnpm run lint
 
       - name: Test
-        run: pnpm -r run test
+        run: pnpm run test
 
       # Runs on its own, after the concurrent workspace suite. These tests spawn
       # the real `pi` CLI, and doing so alongside eight other packages' vitest
@@ -55,96 +55,3 @@ jobs:
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         run: pnpm fallow
-
-  release-please:
-    needs: [check]
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    outputs:
-      releases_created: ${{ steps.release.outputs.releases_created }}
-      releases: ${{ toJSON(steps.release.outputs) }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: main
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-
-      - uses: googleapis/release-please-action@v5
-        id: release
-        with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-      # Advance the commit-search baseline so future runs only walk commits since
-      # the latest release, instead of the default 500. Keeps the per-run API
-      # burst small (avoids the secondary-rate-limit "Bad credentials" failures)
-      # and the run fast in this high-volume monorepo. Runs only when a release
-      # was just cut; [skip ci] prevents the write-back commit from re-triggering.
-      #
-      # SHA source: components live at non-root paths, so the action emits no
-      # top-level `sha` output — only path-prefixed `<path>--sha`. Every component
-      # in one release PR is tagged at the same commit, so any released path's
-      # `--sha` is the release commit. Under a rebase-merge that is the rebased
-      # commit on main (release-please reads the PR's merge_commit_sha, which
-      # GitHub sets to the rebased tip), so it is always an ancestor of future
-      # HEADs. github.sha is a belt-and-suspenders fallback.
-      - name: Advance release-please last-release-sha baseline
-        if: steps.release.outputs.releases_created == 'true'
-        env:
-          OUTPUTS: ${{ toJSON(steps.release.outputs) }}
-          FALLBACK_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          RELEASE_SHA=$(printf '%s' "$OUTPUTS" | jq -r '
-            to_entries
-            | map(select(.key | endswith("--sha")))
-            | map(.value | select(type == "string" and (. | length) == 40))
-            | (.[0] // empty)')
-          if [ -z "$RELEASE_SHA" ]; then
-            RELEASE_SHA="$FALLBACK_SHA"
-          fi
-          if [ -z "$RELEASE_SHA" ]; then
-            echo "Could not determine release sha; leaving baseline unchanged."
-            exit 0
-          fi
-          tmp=$(mktemp)
-          jq --arg sha "$RELEASE_SHA" '.["last-release-sha"] = $sha' release-please-config.json > "$tmp"
-          mv "$tmp" release-please-config.json
-          if git diff --quiet -- release-please-config.json; then
-            echo "last-release-sha already at $RELEASE_SHA."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add release-please-config.json
-          git commit -m "chore: advance release-please last-release-sha baseline [skip ci]"
-          git push origin HEAD:main
-
-  publish:
-    needs: release-please
-    if: needs.release-please.outputs.releases_created == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          registry-url: "https://registry.npmjs.org"
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Publish released packages
-        env:
-          RELEASES: ${{ needs.release-please.outputs.releases }}
-        run: ./scripts/publish-released.sh

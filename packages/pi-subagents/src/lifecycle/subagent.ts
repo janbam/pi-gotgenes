@@ -19,7 +19,7 @@ import type { WorkspaceProvider } from "#src/lifecycle/workspace";
 import { WorkspaceBracket } from "#src/lifecycle/workspace-bracket";
 import { subscribeSubagentObserver } from "#src/observation/record-observer";
 import type { RunConfig } from "#src/runtime";
-import type { AgentInvocation, CompactionInfo, ParentSessionInfo, SessionMessage, SubagentType, ThinkingLevel } from "#src/types";
+import type { CompactionInfo, ParentSessionInfo, SessionMessage, SubagentType, ThinkingLevel } from "#src/types";
 
 /** Per-subagent lifecycle observer — created by SubagentManager for each spawn. */
 export interface SubagentLifecycleObserver {
@@ -29,13 +29,44 @@ export interface SubagentLifecycleObserver {
 	onSessionCreated?(agent: Subagent): void;
 	/** Fires once when the run completes or fails (for concurrency drain). */
 	onRunFinished?(agent: Subagent): void;
+	/**
+	 * Fires once a resumed run is under way — after the record is rewound, so a
+	 * subscriber reading it sees the run that just started rather than the
+	 * outcome of the one it replaced.
+	 */
+	onResumeStarted?(agent: Subagent): void;
 	/** Fires once when a resumed run reaches a terminal state. */
 	onResumeFinished?(agent: Subagent): void;
+	/** Fires when the running agent sends its parent a mid-run message. */
+	onUpdateSent?(agent: Subagent, message: string): void;
+	/**
+	 * Fires when a teardown after the agent's result was delivered reported where
+	 * its work went. Not fired for a failed run or resume: those reach a terminal
+	 * notification of their own, which carries the notice.
+	 */
+	onWorkspaceNotice?(agent: Subagent, notice: string): void;
 	/** Fires on compaction events during the run. */
 	onCompacted?(agent: Subagent, info: CompactionInfo): void;
 }
 
 export type { SubagentStatus } from "#src/lifecycle/subagent-state";
+
+/**
+ * Why a resume of an agent would be refused.
+ *
+ * One vocabulary for a fact three record-level conditions used to answer
+ * separately: the resume door decided it from `isSessionReady()`,
+ * `sessionReleased`, and `workspaceDisposed`, while the result carriers never
+ * consulted any of them and advertised the resume regardless.
+ *
+ * `still-running` is the one transient member: it is a refusal of *now* rather
+ * than of ever, and the carriers word it accordingly.
+ */
+export type ResumeRefusal =
+	| "still-running"
+	| "no-session"
+	| "session-released"
+	| "workspace-disposed";
 
 /**
  * The result of a steer attempt. `Subagent.steer` owns the non-running
@@ -78,7 +109,8 @@ export interface SubagentInit {
 	id: string;
 	type: SubagentType;
 	description: string;
-	invocation?: AgentInvocation;
+	/** The mode SubagentManager resolved for this spawn; drives scheduling and announcement. */
+	isBackground: boolean;
 
 	/** Execution machinery — always supplied; construct-complete, no test fallbacks. */
 	execution: SubagentExecution;
@@ -92,7 +124,12 @@ export class Subagent {
 	readonly id: string;
 	readonly type: SubagentType;
 	readonly description: string;
-	readonly invocation?: AgentInvocation;
+	/**
+	 * Whether this agent runs in the background. Resolved once at the manager
+	 * choke point, so a consumer asks the record rather than re-deriving it from
+	 * a per-call display snapshot only the tool door ever built (#724).
+	 */
+	readonly isBackground: boolean;
 
 	// Lifecycle status and metrics — owned by a private value object; getters and
 	// mutation methods below delegate to it one line.
@@ -105,6 +142,17 @@ export class Subagent {
 	get completedAt(): number | undefined { return this.state.completedAt; }
 	get consumedAt(): number | undefined { return this.state.consumedAt; }
 	get consumed(): boolean { return this.state.consumed; }
+	get claimed(): boolean { return this.state.claimed; }
+	get pendingQuestion(): string | undefined { return this.state.pendingQuestion; }
+	get runUpdates(): readonly string[] { return this.state.runUpdates; }
+	/**
+	 * What the workspace reported at a teardown with no result text to fold it
+	 * into — the provider's own wording for where the child's work ended up.
+	 *
+	 * Undefined for a run that completed normally: there the addendum rides the
+	 * result, and duplicating it here would have every carrier report it twice.
+	 */
+	get workspaceNotice(): string | undefined { return this.state.workspaceNotice; }
 	get toolUses(): number { return this.state.toolUses; }
 	get lifetimeUsage(): Readonly<LifetimeUsage> { return this.state.lifetimeUsage; }
 	get compactionCount(): number { return this.state.compactionCount; }
@@ -136,6 +184,14 @@ export class Subagent {
 	/** True once releaseSession() has freed a live session (distinct from never having had one). */
 	get sessionReleased(): boolean { return this._sessionReleased; }
 
+	/**
+	 * True once this agent's provider-supplied workspace has been torn down.
+	 * False for an agent that never had one, so it names the resume the session
+	 * would re-enter a removed directory for — not merely a session with a
+	 * workspace provider registered.
+	 */
+	get workspaceDisposed(): boolean { return this.workspaceBracket.wasDisposed(); }
+
 	// Steer buffer — messages queued before the session is ready
 	private _pendingSteers: string[] = [];
 	/** Number of steer messages waiting to be delivered. */
@@ -157,6 +213,31 @@ export class Subagent {
 	/** Returns true when a SubagentSession is available (session is ready). */
 	isSessionReady(): boolean {
 		return this.subagentSession != null;
+	}
+
+	/**
+	 * Why a resume of this agent would be refused, or undefined when one would be
+	 * accepted.
+	 *
+	 * The conditions are checked in the order the resume door checks them, so a
+	 * record whose session was released *and* whose workspace is gone reports the
+	 * session — the door's message for it names the retention window, which is
+	 * the fact that explains both. A live run outranks all of them: nothing about
+	 * a settled record is decided yet.
+	 *
+	 * A getter rather than a predicate method because the result carriers read it
+	 * as a field: `OutcomeAddenda` and `AgentReport` both declare it, and a live
+	 * record satisfies them structurally only if it is a property.
+	 */
+	get resumeRefusal(): ResumeRefusal | undefined {
+		// Before the session check: a run transitions to running before it creates
+		// its session, and "still running" describes that record better than "no
+		// session" does. A queued agent is not running and keeps the no-session
+		// answer, which is the truth about it.
+		if (this.isRunning()) return "still-running";
+		if (!this.isSessionReady()) return this._sessionReleased ? "session-released" : "no-session";
+		if (this.workspaceDisposed) return "workspace-disposed";
+		return undefined;
 	}
 
 	/**
@@ -215,7 +296,7 @@ export class Subagent {
 		this.id = init.id;
 		this.type = init.type;
 		this.description = init.description;
-		this.invocation = init.invocation;
+		this.isBackground = init.isBackground;
 
 		// Lifecycle status and metrics — fresh queued state unless one is supplied
 		this.state = init.state ?? new SubagentState();
@@ -256,7 +337,6 @@ export class Subagent {
 					agentId: this.id,
 					agentType: this.type,
 					baseCwd: this.execution.baseCwd,
-					invocation: this.invocation,
 				});
 			} catch (err) {
 				this.markError(err);
@@ -266,6 +346,7 @@ export class Subagent {
 			}
 		}
 
+		const runConfig = this.execution.getRunConfig?.();
 		try {
 			this.subagentSession = await this.execution.createSubagentSession({
 				snapshot: this.execution.snapshot,
@@ -274,6 +355,10 @@ export class Subagent {
 				parentSession: this.execution.parentSession,
 				model: this.execution.model,
 				thinkingLevel: this.execution.thinkingLevel,
+				askParent: (question) => { this.state.setPendingQuestion(question); },
+				notifyParent: this.canSendUpdates(runConfig)
+					? (message) => { this.announceUpdate(message); }
+					: undefined,
 			});
 		} catch (err) {
 			// The factory disposed its own session on a post-creation failure.
@@ -287,7 +372,6 @@ export class Subagent {
 		}));
 		this.execution.observer?.onSessionCreated?.(this);
 
-		const runConfig = this.execution.getRunConfig?.();
 		try {
 			const result = await this.subagentSession.runTurnLoop(this.execution.prompt, {
 				maxTurns: this.execution.maxTurns,
@@ -299,6 +383,36 @@ export class Subagent {
 		} catch (err) {
 			this.failRun(err);
 		}
+	}
+
+	/**
+	 * Whether this run gets the mid-run update channel.
+	 *
+	 * The operator's setting is the whole gate: where an update lands is decided
+	 * per message by announceUpdate(), not per child at session creation, so no
+	 * child has to be refused the tool for a condition that can change mid-run.
+	 * Defaults to on when no run config is supplied, matching the setting.
+	 */
+	private canSendUpdates(runConfig: RunConfig | undefined): boolean {
+		return runConfig?.midRunUpdates ?? true;
+	}
+
+	/**
+	 * Record an update the child sent, then offer it to the announcement channel.
+	 *
+	 * Every update joins the run's ledger, whoever ends up delivering it: this
+	 * side cannot know whether an announcement will reach the parent in time, or
+	 * at all, so it records unconditionally and lets the channel that delivers
+	 * mark what it took. What the ledger still owes is what an outcome carrier
+	 * renders alongside the result.
+	 *
+	 * The observer is told either way: an update is a fact about the run, like
+	 * the terminal transitions, so the lifecycle event fires regardless of which
+	 * carrier delivers it.
+	 */
+	private announceUpdate(message: string): void {
+		this.state.recordUpdate(message);
+		this.execution.observer?.onUpdateSent?.(this, message);
 	}
 
 	/**
@@ -373,6 +487,7 @@ export class Subagent {
 	/** The resume body. Always resolves — errors terminate through failResume(). */
 	private async runResume(subagentSession: SubagentSession, prompt: string, signal?: AbortSignal): Promise<void> {
 		this.resetForResume(Date.now());
+		this.execution.observer?.onResumeStarted?.(this);
 		this.listeners.attachObserver(subscribeSubagentObserver(subagentSession, this.state, {
 			onCompact: (info) => this.execution.observer?.onCompacted?.(this, info),
 		}));
@@ -384,17 +499,24 @@ export class Subagent {
 		}
 	}
 
-	/** Terminate a resume as completed: mark, release listeners, notify observer. */
+	/** Terminate a resume as completed: mark, dispose or hold the workspace, release listeners, notify observer. */
 	completeResume(result: string): void {
-		this.markCompleted(result);
+		// A child answering one question may need to ask another, which holds the
+		// workspace for the next resume the same way the original run did.
+		const finalResult = this.pendingQuestion !== undefined
+			? result
+			: result + this.workspaceBracket.dispose({ status: "completed", description: this.description });
+		this.markCompleted(finalResult);
 		this.listeners.release();
 		this.execution.observer?.onResumeFinished?.(this);
 	}
 
-	/** Terminate a resume as errored: mark, release listeners, notify observer. */
+	/** Terminate a resume as errored: mark, release listeners, best-effort workspace dispose, notify observer. */
 	failResume(err: unknown): void {
 		this.markError(err);
+		this.clearPendingQuestion();
 		this.listeners.release();
+		this.disposeWorkspaceQuietly("error");
 		this.execution.observer?.onResumeFinished?.(this);
 	}
 
@@ -443,6 +565,25 @@ export class Subagent {
 	/** Record the parent collected this agent's outcome. Idempotent. */
 	markConsumed(at?: number): void {
 		this.state.markConsumed(at);
+	}
+
+	/** The announcement channel delivered this update; no outcome carrier repeats it. */
+	markUpdateAnnounced(message: string): void {
+		this.state.markUpdateAnnounced(message);
+	}
+
+	/** A carrier has committed to delivering this outcome; nothing else announces it. */
+	claim(): void {
+		this.state.claim();
+	}
+
+	/** The carrier abandoned its commitment; announcing is owed again. */
+	// Called on the `Subagent` returned by `getRecord()` from get-result-tool.ts
+	// and agent-tool.ts, both of which declare it through their own structural
+	// interface — fallow cannot trace through interfaces, and reaches this only
+	// through the release-then-announce test.
+	release(): void {
+		this.state.release();
 	}
 
 	/**
@@ -503,9 +644,15 @@ export class Subagent {
 			: result.steered
 				? "steered"
 				: "completed";
-		const finalResult =
-			result.responseText +
-			this.workspaceBracket.dispose({ status: finalStatus, description: this.description });
+		// A completed child that declared a question is inviting a resume, so its
+		// workspace stays live for the resume to re-enter. Every other outcome ends
+		// the run for good and tears it down here. The question was recorded by
+		// ask_parent during the run, so it is already on the record here.
+		const holdForResume = finalStatus === "completed" && this.pendingQuestion !== undefined;
+		const finalResult = holdForResume
+			? result.responseText
+			: result.responseText +
+				this.workspaceBracket.dispose({ status: finalStatus, description: this.description });
 
 		if (result.aborted) this.markAborted(finalResult);
 		else if (result.steered) this.markSteered(finalResult);
@@ -520,6 +667,7 @@ export class Subagent {
 	 * swallowed so the caller's remaining cleanup still runs.
 	 */
 	async disposeSession(): Promise<void> {
+		this.disposeHeldWorkspace();
 		await disposeQuietly(this.subagentSession, "child session dispose");
 	}
 
@@ -535,6 +683,7 @@ export class Subagent {
 	async releaseSession(): Promise<void> {
 		const session = this.subagentSession;
 		if (!session) return;
+		this.disposeHeldWorkspace();
 		this._releasedOutputFile = session.outputFile;
 		this.subagentSession = undefined;
 		this._sessionReleased = true;
@@ -544,13 +693,55 @@ export class Subagent {
 	/** Fail a run: mark error, release listeners, best-effort workspace dispose, notify observer. */
 	failRun(err: unknown): void {
 		this.markError(err);
+		this.clearPendingQuestion();
 		this.listeners.release();
-
-		try {
-			this.workspaceBracket.dispose({ status: "error", description: this.description });
-		} catch (cleanupErr) { debugLog("workspace dispose on agent error", cleanupErr); }
-
+		this.disposeWorkspaceQuietly("error");
 		this.execution.observer?.onRunFinished?.(this);
+	}
+
+	/**
+	 * Drop a question the child recorded before the run failed.
+	 *
+	 * Every carrier renders a pending question as "answer by resuming me", which
+	 * is not the right next action after a failure — and the failure text already
+	 * tells the parent to look. An aborted or steered run keeps its question:
+	 * those reached a terminal transition with an outcome to report.
+	 */
+	private clearPendingQuestion(): void {
+		this.state.setPendingQuestion(undefined);
+	}
+
+	/**
+	 * Tear down a workspace still held once the agent's run is over — the child
+	 * asked a question nobody answered, and its session is now going away.
+	 *
+	 * A no-op while the agent is active: an in-flight run's own terminal
+	 * transition owns disposal, and pulling the directory out from under a live
+	 * child is not this path's business.
+	 */
+	private disposeHeldWorkspace(): void {
+		if (this.isActive()) return;
+		// Announce what *this* disposal produced, not what the record holds: both
+		// release and teardown reach here, and the second finds nothing to dispose.
+		const notice = this.disposeWorkspaceQuietly(this.status);
+		if (notice) this.execution.observer?.onWorkspaceNotice?.(this, notice);
+	}
+
+	/**
+	 * Dispose the workspace without letting a provider failure escape, recording
+	 * what it reported and handing that back.
+	 *
+	 * These are the paths with no result text left to fold the addendum into, so
+	 * it is kept on the record for the carriers to report instead. The value is
+	 * returned as well as stored, so a caller can tell an addendum this call
+	 * produced from one an earlier disposal already recorded.
+	 */
+	private disposeWorkspaceQuietly(status: SubagentStatus): string {
+		try {
+			const notice = this.workspaceBracket.dispose({ status, description: this.description });
+			if (notice) this.state.setWorkspaceNotice(notice);
+			return notice;
+		} catch (err) { debugLog(`workspace dispose (${status})`, err); return ""; }
 	}
 }
 

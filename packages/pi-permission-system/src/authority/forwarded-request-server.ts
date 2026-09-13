@@ -1,30 +1,15 @@
 import { join } from "node:path";
-import type { DecisionSource } from "#src/authority/decision-source";
-import {
-  type ForwarderContext,
-  getSessionId,
-} from "#src/authority/forwarder-context";
-import type { PermissionPromptDecision } from "#src/authority/permission-dialog";
-import {
-  type ForwardedAccessFacts,
-  type ForwardedAccessIntent,
-  type ForwardedPermissionRequest,
-  type ForwardedPermissionResponse,
-  isForwardedPermissionRequestForSession,
-  type PermissionForwardingLocation,
-} from "#src/authority/permission-forwarding";
-import type { SubagentSessionRegistry } from "#src/authority/subagent-registry";
-import type { DecisionBroadcaster } from "#src/decision-reporter";
-import type {
-  PermissionDecisionEvent,
-  PermissionDecisionResolution,
-} from "#src/permission-events";
+import type { DecisionBroadcaster } from "#src/logging/decision-reporter";
+import type { DebugReviewLogger } from "#src/logging/session-logger";
 import { buildForwardedAskPayload } from "#src/presentation/forwarded-ask-payload";
-import { SessionApproval } from "#src/session-approval";
-import type { SessionApprovalRecorder } from "#src/session-approval-recorder";
-import type { DebugReviewLogger } from "#src/session-logger";
+import type { PermissionDecisionEvent } from "#src/service/permission-events";
+import { SessionApproval } from "#src/session/session-approval";
+import type { SessionApprovalRecorder } from "#src/session/session-approval-recorder";
 import type { PermissionCheckResult } from "#src/types";
 import type { AskEscalator } from "./authorizer-selection";
+import { resolutionFor } from "./decision-resolution";
+import type { DecisionSource } from "./decision-source";
+import { type ForwarderContext, getSessionId } from "./forwarder-context";
 import {
   cleanupPermissionForwardingLocationIfEmpty,
   ensureDirectoryExists,
@@ -37,7 +22,20 @@ import {
   safeDeleteFile,
   writeJsonFileAtomic,
 } from "./forwarding-io";
+import {
+  createDeniedPermissionDecision,
+  type PermissionPromptDecision,
+} from "./permission-dialog";
+import {
+  type ForwardedAccessFacts,
+  type ForwardedAccessIntent,
+  type ForwardedPermissionRequest,
+  type ForwardedPermissionResponse,
+  isForwardedPermissionRequestForSession,
+  type PermissionForwardingLocation,
+} from "./permission-forwarding";
 import type { PromptPermissionDetails } from "./permission-prompter";
+import type { SubagentSessionRegistry } from "./subagent-registry";
 
 /**
  * Narrow seam describing what `ForwardingManager` needs from the server: a
@@ -183,39 +181,20 @@ function buildServedDecisionEvent(
     value: details.value ?? facts.value,
     agentName: details.agentName,
     result: decision.approved ? "allow" : "deny",
-    resolution: servedResolution(decision),
+    resolution: resolutionFor(decision.decidedBy, {
+      approved: decision.approved,
+      // The grant scope is reported as the human chose it. `applyGrantScope`
+      // rewrites a whole-serving-session grant to a plain approval on the
+      // wire, but that translation is about what the *child* records, not
+      // about what was allowed here.
+      forSession:
+        decision.state === "approved_for_session" ||
+        decision.state === "approved_for_serving_session",
+    }),
     origin: null,
     matchedPattern: null,
     forwarding: details.forwarding ?? null,
   };
-}
-
-/**
- * Name how a served ask resolved, reading the decision's own stamp rather than
- * re-deriving it from the outcome: the site that decided already recorded what
- * it was (#726).
- *
- * The grant scope is reported as the human chose it. {@link applyGrantScope}
- * rewrites a whole-serving-session grant to a plain approval on the wire, but
- * that translation is about what the *child* records, not about what was
- * allowed here.
- */
-function servedResolution(
-  decision: PermissionPromptDecision,
-): PermissionDecisionResolution {
-  if (decision.decidedBy.kind === "gate_error") {
-    return "gate_error";
-  }
-  if (decision.confirmationUnavailable) {
-    return "confirmation_unavailable";
-  }
-  if (!decision.approved) {
-    return "user_denied";
-  }
-  return decision.state === "approved_for_session" ||
-    decision.state === "approved_for_serving_session"
-    ? "user_approved_for_session"
-    : "user_approved";
 }
 
 // ── ForwardedRequestServer ────────────────────────────────────────────────
@@ -368,16 +347,14 @@ export class ForwardedRequestServer implements InboxProcessor {
       return decision;
     }
     if (request.sessionApproval) {
-      this.recorder.recordSessionApproval(
-        SessionApproval.multiple(
-          request.sessionApproval.surface,
-          request.sessionApproval.patterns,
-        ),
+      const { grants } = request.sessionApproval;
+      const approval = SessionApproval.forGrants(grants).atWidth(
+        decision.sessionGrantWidth ?? "proven",
       );
+      this.recorder.recordSessionApproval(approval);
       this.logger.review("forwarded_permission.session_recorded", {
         ...logDetails,
-        surface: request.sessionApproval.surface,
-        patterns: request.sessionApproval.patterns,
+        grants: approval.grants,
       });
     }
     return {
@@ -426,6 +403,9 @@ export class ForwardedRequestServer implements InboxProcessor {
         // Carried onto the wire so the requester can name what decided inside
         // this session, not merely that this session answered (#726).
         decidedBy: decision.decidedBy,
+        // The child records a subagent-scoped grant itself, so the width the
+        // human chose has to reach it (#813).
+        sessionGrantWidth: decision.sessionGrantWidth,
       } satisfies ForwardedPermissionResponse);
     } catch (error) {
       logPermissionForwardingError(
@@ -477,9 +457,12 @@ export class ForwardedRequestServer implements InboxProcessor {
           : "forwarded_permission.auto_denied",
         { ...logDetails, decidedBy },
       );
+      // A deny-with-reason rule's text is the operator's own explanation, and
+      // the requesting session relays it to its agent — so it travels with the
+      // verdict rather than stopping at the node that holds the config (#844).
       return approved
         ? { approved: true, state: "approved", decidedBy }
-        : { approved: false, state: "denied", decidedBy };
+        : { ...createDeniedPermissionDecision(check.reason), decidedBy };
     }
 
     this.logger.review("forwarded_permission.prompted", logDetails);

@@ -45,6 +45,25 @@ describe("createTestSubagent", () => {
 		});
 	});
 
+	describe("session readiness", () => {
+		it("builds a record with no session by default", () => {
+			expect(createTestSubagent().isSessionReady()).toBe(false);
+		});
+
+		it("attaches a session stub when sessionReady is requested", () => {
+			expect(createTestSubagent({ sessionReady: true }).isSessionReady()).toBe(true);
+		});
+
+		it("leaves the attached session's outputFile unset by default", () => {
+			expect(createTestSubagent({ sessionReady: true }).outputFile).toBeUndefined();
+		});
+
+		it("threads outputFile into the attached session stub", () => {
+			const record = createTestSubagent({ sessionReady: true, outputFile: "/sessions/child.jsonl" });
+			expect(record.outputFile).toBe("/sessions/child.jsonl");
+		});
+	});
+
 	it("returns a completed agent with expected defaults", () => {
 		const record = createTestSubagent();
 		expect(record.id).toBe("agent-1");

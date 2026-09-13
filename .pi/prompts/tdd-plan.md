@@ -1,5 +1,5 @@
 ---
-description: Execute the TDD steps from a package docs/plans/ plan as red→green→commit cycles
+description: Execute the TDD steps from a package docs/plans/ plan as red→green→verify→commit cycles
 ---
 
 # Execute a plan with TDD
@@ -12,7 +12,7 @@ Before locating or reading the plan, make sure the working tree is up to date wi
 
 1. Determine the branch: `git branch --show-current`.
 2. **Worktree branch** (an `issue-*` branch): run `git fetch origin` and proceed.
-   A diverged `origin/main` (a sibling peer landed first) is expected here — do **not** `git pull --ff-only` and stop; the worktree ship flow (`/ship-worktree`) owns rebasing onto `origin/main`.
+   A diverged `origin/main` (a sibling peer landed first) is expected here — do **not** `git pull --ff-only` and stop; the worktree ship flow (`/sync-worktree`) owns rebasing onto `origin/main`.
 3. **Trunk** (`main`): run `git pull --ff-only`.
    If it fails for **any** reason — uncommitted changes, divergent history, merge conflict, network error, detached HEAD — stop immediately and report the failure to the user.
    Do not attempt to stash, rebase, force, or otherwise resolve.
@@ -46,12 +46,12 @@ Check whether prior sessions have already done work on this issue:
 
 ## Load skills
 
-Before executing the TDD cycle, load skills relevant to the change:
+Before executing the TDD cycle, load skills relevant to the change.
+Skip any already in this session's context — the trunk flow runs planning, implementation, ship, and retro in one process — but re-load after a compaction, which drops the body while leaving the memory of having read it.
 
 - Load the `package-<PKG>` skill (e.g., `package-pi-permission-system`) for package-specific architecture, priorities, and testing context.
 - Load the `code-design` skill for design principles, TypeScript conventions, and structural heuristics.
 - Load the `testing` skill for Vitest mock patterns and TDD planning rules.
-- Load the `tidy-first` skill — you will use it after the green baseline to dispatch the Tidy-First assessor before implementing.
 - Load the `pre-completion` skill — you will use it after the final TDD step to dispatch the quality reviewer.
 
 ## Verify green baseline
@@ -69,24 +69,40 @@ If a check fails on an issue your change will not touch (e.g. a pre-existing lin
 If the failure is non-trivial, or you cannot quickly establish why it is failing, stop and report to the user.
 Do not start TDD cycles from a broken baseline.
 
-## Tidy First
-
-With the baseline green and the plan's target files known, follow the `tidy-first` skill: dispatch the `tidy-first-assessor` subagent over the files the change will touch, then land its **Recommended** preparatory refactorings as separate `refactor:`/`test:` commits **before** the first Red→Green cycle — make the change easy, then make the easy change.
-The assessment runs in a subagent so the many-files read does not consume this session's context.
-Skip when the plan touches no `src/`/`test/` files (the skill's applicability gate).
-
 ## Execute the TDD cycle
+
+The plan's Tidy-First preparatory steps (`refactor:`/`test:` steps naming the friction they prepare) are ordinary steps here.
+Execute them in place, each as its own commit leaving the tree green, and run no separate assessment — `/plan-issue` already dispatched the assessor.
+If the tree has moved since the plan was written and a preparatory step no longer fits what it describes, stop and report rather than improvising a substitute.
 
 For **each** step in the plan's "TDD Order", in order:
 
 1. **Red.**
    Write the failing tests the step describes.
    Run only the affected test file: `pnpm --filter @gotgenes/<pkg> exec vitest run <test-path>` and confirm failures (plain `pnpm vitest run` fails at the repo root in this workspace).
+   When the step pins a literal pattern (regex, glob, format string), derive your own input set — the plan's examples are a floor, not the case list.
+   Run the pattern over the values the repo already produces in bulk (`git tag --list`, `gh pr list`) before committing (Refs #817).
+   When the step quotes a string the code under test **produces** (a rendered sentence, an error message), copy it from the producer or an existing assertion — a plan transcribes it from memory and drops an article (Refs #772, #844).
 2. **Green.**
    Implement the minimum code to make those tests pass.
    Re-run the same file and confirm green.
    When the step adds or changes a shared type/interface (or a loop/consumer over one), run `pnpm run check` before committing — Vitest does not typecheck, and a type error caught only at end-of-cycle forces a commit reorder.
-3. **Commit.**
+3. **Verify the pins.**
+   Apply the killing mutation the plan named for this step, confirm the step's new tests go red, then revert it.
+   Fixing a vacuous test costs nothing here and costs an amended commit later, which is why this sits before the commit rather than in the end-of-cycle review.
+   These cases make this mandatory rather than optional, because the Red step's own evidence does not cover them:
+   - The step's red came from a **signature change** (a required field that did not exist yet), so every test failed for the same reason and none of them demonstrated that its own assertion discriminates.
+   - A test was **authored or rewritten after Green**, so it never had a Red step at all.
+   - The step's tests span more than one equivalence class — one mutation kills one class, so a surviving test is only evidence when you can say which mutation should have killed it.
+   - A new test **stayed green during Red**, so Red produced no evidence it discriminates — a deliberate regression pin and a vacuous probe look identical (Refs #801).
+   - The step **relocated** an existing call or registration, so the plan's mutations cover the code it authored and not the line that merely changed sites (Refs #827).
+
+   Save the green file first (`cp <file> /tmp/green.ts`) and restore from that copy; `git checkout -- <file>` reverts to HEAD, discarding the step's own uncommitted green edit (Refs #830).
+   Re-run before committing; never commit with a mutation in the tree.
+   Apply the mutation with `Edit`, and confirm the file changed before reading the suite — a scripted multi-line substitution that matches nothing reads exactly like a mutation that killed nothing, and one that matches every sibling site reddens tests the mutation was never meant to touch (Refs #870).
+   Prefer changing a compared literal over restructuring control flow: a mutation that crashes, or that the linter rejects, produces reds that are not discrimination signals (Refs #883).
+   Count the reds against the step's prediction: a mutation that kills fewer tests than the plan named is a finding, not a pass — the test was never written, the plan's claim was wrong, or the mutated code is dead (Refs #844, #894).
+4. **Commit.**
    Use the commit message the plan suggests, or a Conventional Commits message that matches:
    - `test:` for test-only commits (rare; usually folded into the feat).
    - `feat:` for new behavior.
@@ -131,12 +147,16 @@ The skill exits at its first step when no phase is open, and recording a disposi
 6. Cross-check the plan's "Module-Level Changes" table against actually-changed files.
    If a listed file was not touched, update it now or note the deviation.
 7. If `packages/<PKG>/docs/architecture/` exists, check whether the changes affect the module structure or data-flow descriptions and update them.
-   If the issue completes a numbered roadmap step, prefix `✅` on both the step heading and its Mermaid diagram node — a `Landed:` detail line is not a substitute for the `✅`.
+   If the issue completes a roadmap step, prefix `✅` on both the step heading and its Mermaid diagram node — a `Landed:` detail line is not a substitute for the `✅`.
+   Confirm both landed before committing: `grep -cE '✅.*#<N>\b' <arch-doc>` must report 2 — no lint gate sees a missing `✅` (Refs #872).
+   Key it on the issue number, not the step's ordinal: the heading and the node both carry `#<N>` whether the phase identifies its steps by ordinal or by issue.
    Flip the phase status row only when every step in the phase is done.
 8. Commit doc updates as `docs: <summary>`.
 9. Preview the changelog: `git log --format='%s' <plan-commit>..HEAD | grep -E '^(feat|fix)'`.
-   Every surviving line must name a user-observable outcome — a line describing an internal seam means that commit should have been `refactor:`; retype it now, while nothing is pushed.
-10. **Do not edit `CHANGELOG.md`** — release-please owns it and will generate entries from your Conventional Commit messages on the next release.
+   Every surviving line must name a user-observable outcome, not an internal seam.
+   A seam-named line is either a mistyped commit (retype to `refactor:`) or a correct `fix:`/`feat:` with a mechanism-named subject (reword to the symptom).
+   Fix either now, while nothing is pushed (Refs #724).
+10. **Do not edit `CHANGELOG.md`** — the release workflow owns it and will generate entries from your Conventional Commit messages on the next release.
 
 ## Pre-completion review
 
@@ -193,4 +213,4 @@ Append with the `Edit` tool (or `Write` for a new file), not a shell heredoc.
 When appending a new stage to an existing retro, anchor the `Edit` on the file's last line or use `Write` with the full content — the repeated `### Observations` / `### Session summary` headers make header-anchored edits ambiguous.
 
 Stop.
-The next step is `/ship-issue`.
+The next step is `/ship <N>` on trunk, or `/sync-worktree <N>` (peer session) then `/ship <N>` at the root on an `issue-<N>-*` branch.

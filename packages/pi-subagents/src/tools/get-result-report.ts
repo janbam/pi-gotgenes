@@ -7,7 +7,12 @@
  * result-renderer.ts pattern used by the subagent tool's TUI renderer.
  */
 
-import type { SubagentStatus } from "#src/lifecycle/subagent";
+import type { ResumeRefusal, SubagentStatus } from "#src/lifecycle/subagent";
+import {
+	renderOutcomeAddenda,
+	renderOutcomeBody,
+	renderStatusNote,
+} from "#src/observation/outcome-delivery";
 
 /** The data a get_subagent_result report renders from — only what the formatter reads. */
 export interface AgentReport {
@@ -30,6 +35,17 @@ export interface AgentReport {
 	conversation?: string;
 	/** Persisted transcript path; rendered as a pointer so the parent can read it directly. */
 	transcriptPath?: string;
+	/** The updates the agent sent while this call's carrier held the outcome. */
+	runUpdates?: readonly string[];
+	/** The question the agent ended its turn with, when it declared one. */
+	pendingQuestion?: string;
+	/**
+	 * Why a resume would be refused; undefined when one would be accepted.
+	 * Required, for the reason `OutcomeAddenda` gives.
+	 */
+	resumeRefusal: ResumeRefusal | undefined;
+	/** Where a teardown with no result text to carry it saved the agent's work. */
+	workspaceNotice?: string;
 }
 
 /** Assemble the stats parts: Tool uses / tokens? / Context? / Compactions? / Duration. */
@@ -42,23 +58,22 @@ export function renderStatsParts(report: AgentReport): string[] {
 	return parts;
 }
 
-/** Select the per-status body: running note, error line, or trimmed result. */
+/**
+ * Select the per-status body. `AgentReport` structurally satisfies
+ * `OutcomeBody`, so this is the shared renderer under this carrier's name.
+ */
 export function renderReportBody(report: AgentReport): string {
-	if (report.status === "running")
-		return "Agent is still running. Use wait: true or check back later.";
-	if (report.status === "error") return `Error: ${report.error}`;
-	if (report.stoppedWhileQueued)
-		return "Agent was stopped while queued and never started. No work was performed.";
-	return report.result?.trim() ?? "No output.";
+	return renderOutcomeBody(report);
 }
 
 /** Assemble the full get_subagent_result report text. */
 export function formatAgentReport(report: AgentReport): string {
 	let output =
 		`Agent: ${report.id}\n` +
-		`Type: ${report.displayName} | Status: ${report.status} | ${renderStatsParts(report).join(" | ")}\n` +
+		`Type: ${report.displayName} | Status: ${report.status}${renderStatusNote(report.status)} | ${renderStatsParts(report).join(" | ")}\n` +
 		`Description: ${report.description}\n\n`;
 	output += renderReportBody(report);
+	output += renderOutcomeAddenda(report);
 	if (report.conversation) {
 		output += `\n\n--- Agent Conversation ---\n${report.conversation}`;
 	}

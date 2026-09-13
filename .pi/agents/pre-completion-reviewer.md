@@ -1,5 +1,5 @@
 ---
-description: Fresh-context quality reviewer — runs deterministic checks and judgment checklist before handoff to /ship-issue
+description: Fresh-context quality reviewer — runs deterministic checks and judgment checklist before handoff to /ship
 tools: read, grep, find, ls, bash
 model: anthropic/claude-sonnet-5
 ---
@@ -32,6 +32,16 @@ Fix the pattern before widening the root, in this order:
 To confirm an SDK or dependency API, read the installed types under `node_modules/.pnpm/<pkg>@<version>/` and pin the version to the one the package depends on.
 A store can hold several versions of the same package, so an unpinned match may come from a copy the code never loads.
 
+Two reads outside the repo are sanctioned, and neither is a search:
+
+- The sibling Pi checkout (`../pi` from the root checkout, `../../pi` from a worktree) for Pi SDK mechanism.
+  It tracks `main` and runs ahead of the pinned dependency, so confirm any API against the installed version too.
+- The published tarball for an exact version (`pnpm view <pkg>@<version> dist.tarball`), for a version-boundary question.
+
+A version-boundary question — "at which release did X change?"
+— is the signal to stop searching the working tree.
+The store holds one or two versions, so no amount of widening answers it (Refs #905).
+
 If you genuinely cannot answer a question within the repo, report it as an open question in your findings rather than escalating the search.
 
 ## Input
@@ -62,6 +72,9 @@ Do not run Step 2 until all four pass.
 
 Work through these sections in order.
 Each section has an applicability gate — report **SKIP** with a reason for sections that do not apply.
+
+Before reporting a missing-coverage finding, establish that the combination is reachable and cite the code path that reaches it.
+An unreachable gap costs the implementing agent a rebuttal and a discarded test (Refs #793).
 
 ### 2a. Acceptance criteria
 
@@ -117,7 +130,7 @@ Check in both directions:
 - READMEs — check the root `README.md` and any package `README.md` files that describe affected modules.
   When a change removes or renames a slash command or user-facing feature, grep the package `README.md` for the command/feature name — a README documents commands, not module filenames, so a module-name match misses it (Refs #470).
 - Architecture docs (`packages/*/docs/architecture/`) — if module structure changed, are layout listings or diagrams updated?
-- Roadmap status (`packages/*/docs/architecture/`) — if the issue completes a numbered step, do **both** the step heading and its Mermaid diagram node carry `✅` (a `Landed:` line alone is not enough)?
+- Roadmap status (`packages/*/docs/architecture/`) — if the issue completes a roadmap step, do **both** the step heading and its Mermaid diagram node carry `✅` (a `Landed:` line alone is not enough)?
   The phase status row flips only when every step is done — verify it against the actual step count.
 
 #### Reverse — does existing content need condensing or removal?
@@ -173,6 +186,7 @@ If not available, report **WARN** — note that `mmdc` is not installed and Merm
 If available, for each modified markdown file containing Mermaid blocks:
 
 1. Run `mmdc -i <file> -o /tmp/mermaid-check.svg 2>&1` — report parse errors as **FAIL**.
+   The command's own output is the verdict; the SVG is disposable and never needs to be found or inspected.
 2. Scan the Mermaid blocks for known renderer pitfalls and report as **WARN**:
    - Semicolons inside arrow messages or `Note over` bodies (use `—` or commas instead).
    - Raw `<word>` tokens in arrow messages or participant aliases (use `{word}` or backticks).
@@ -289,7 +303,7 @@ WARN — plan names a "<X>" follow-up but records no issue number (file it befor
 SKIP — no plan, or plan names no follow-up
 
 ### Overall
-PASS — ready for /ship-issue
+PASS — ready for /ship
 ```
 
 When the overall result is **FAIL**, end the report with a "Fix required" block:

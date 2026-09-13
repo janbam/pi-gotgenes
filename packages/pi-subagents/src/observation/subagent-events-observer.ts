@@ -55,6 +55,20 @@ export class SubagentEventsObserver implements SubagentManagerObserver {
 		this.persistAndNotify(record);
 	}
 
+	/**
+	 * A settled agent went back to running. Announced only, and on its own
+	 * channel: `subagents:started` reports the first run, and a consumer counting
+	 * it once per agent must not see it twice. Nothing is persisted — the session
+	 * entry records outcomes, and a run that has just begun is not one.
+	 */
+	onSubagentResuming(record: Subagent): void {
+		this.emit("subagents:resuming", {
+			id: record.id,
+			type: record.type,
+			description: record.description,
+		});
+	}
+
 	onSubagentResumed(record: Subagent): void {
 		// A resumed run terminates only as completed or error; a single distinct
 		// channel carries both — the payload's status/error discriminate. Existing
@@ -66,8 +80,10 @@ export class SubagentEventsObserver implements SubagentManagerObserver {
 	/**
 	 * Persist the terminal record for cross-extension history reconstruction and
 	 * announce completion. Shared by every terminal-state handler (fresh and
-	 * resumed). The nudge suppresses itself if the record is already consumed —
-	 * consumption is domain state on the record, not owned here.
+	 * resumed). Whether a nudge is actually owed is the notification manager's
+	 * decision — it suppresses itself when a carrier has claimed the outcome or
+	 * the parent has already consumed it. Both are domain state on the record,
+	 * not owned here.
 	 */
 	private persistAndNotify(record: Subagent): void {
 		this.appendEntry("subagents:record", {
@@ -81,6 +97,31 @@ export class SubagentEventsObserver implements SubagentManagerObserver {
 			completedAt: record.completedAt,
 		});
 		this.notifications.sendCompletion(record);
+	}
+
+	/**
+	 * A still-running child sent its parent a message. Announced, never
+	 * persisted: the session entry reconstructs terminal outcomes, and this is
+	 * not one.
+	 */
+	onSubagentUpdate(record: Subagent, message: string): void {
+		this.emit("subagents:update", {
+			id: record.id,
+			type: record.type,
+			description: record.description,
+			message,
+		});
+		this.notifications.sendUpdate(record, message);
+	}
+
+	/**
+	 * A teardown after the child's result was delivered reported where its work
+	 * went. Announced only: no event channel, because no consumer asks for one,
+	 * and nothing is persisted — the outcome this belongs to was recorded when
+	 * the run ended.
+	 */
+	onSubagentWorkspaceNotice(record: Subagent, notice: string): void {
+		this.notifications.sendWorkspaceNotice(record, notice);
 	}
 
 	onSubagentCompacted(record: Subagent, info: CompactionInfo): void {
@@ -101,7 +142,7 @@ export class SubagentEventsObserver implements SubagentManagerObserver {
 			id: record.id,
 			type: record.type,
 			description: record.description,
-			isBackground: true,
+			isBackground: record.isBackground,
 		});
 	}
 }

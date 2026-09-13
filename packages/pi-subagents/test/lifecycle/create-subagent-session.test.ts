@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { CreateSessionOptions } from "#src/lifecycle/create-subagent-session";
 import { createSubagentSession } from "#src/lifecycle/create-subagent-session";
 import { SubagentSession } from "#src/lifecycle/subagent-session";
-import { STUB_SNAPSHOT } from "#test/helpers/stub-ctx";
+import { STUB_CTX, STUB_SNAPSHOT } from "#test/helpers/stub-ctx";
 import {
   createAgentLookup,
   createChildLifecycleMock,
@@ -182,6 +183,37 @@ describe("createSubagentSession — lifecycle ordering", () => {
     expect(createdOrder).toBeLessThan(bindOrder);
   });
 
+  it("emits bound after bindExtensions()", async () => {
+    await createSubagentSession(
+      { snapshot: STUB_SNAPSHOT, type: "Explore" },
+      createSubagentSessionDeps({ io, exec, registry: mockAgentLookup, lifecycle }),
+    );
+
+    expect(lifecycle.bound).toHaveBeenCalledOnce();
+    const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
+    const boundOrder = lifecycle.bound.mock.invocationCallOrder[0];
+    expect(bindOrder).toBeLessThan(boundOrder);
+  });
+
+  it("carries the session id and parent session id in bound", async () => {
+    await createSubagentSession(
+      {
+        snapshot: STUB_SNAPSHOT,
+        type: "Explore",
+        parentSession: {
+          parentSessionFile: "/sessions/parent.jsonl",
+          parentSessionId: "parent-session-42",
+        },
+      },
+      createSubagentSessionDeps({ io, exec, registry: mockAgentLookup, lifecycle }),
+    );
+
+    expect(lifecycle.bound).toHaveBeenCalledWith({
+      sessionId: "child-session-id",
+      parentSessionId: "parent-session-42",
+    });
+  });
+
   it("carries the session id and parent session id in session-created", async () => {
     io.deriveSessionDir.mockReturnValue("/custom/session/dir");
 
@@ -236,6 +268,24 @@ describe("createSubagentSession — dispose on creation failure", () => {
     expect(session.dispose).toHaveBeenCalledOnce();
   });
 
+  it("does not emit bound when bindExtensions throws", async () => {
+    const session = createFactorySession();
+    session.bindExtensions = vi.fn().mockRejectedValue(new Error("bind failed"));
+    io.createSession.mockResolvedValue({ session });
+    const lifecycle = createChildLifecycleMock();
+
+    await expect(
+      createSubagentSession(
+        { snapshot: STUB_SNAPSHOT, type: "Explore" },
+        createSubagentSessionDeps({ io, exec, registry: mockAgentLookup, lifecycle }),
+      ),
+    ).rejects.toThrow("bind failed");
+
+    // The child never ran, so there is nothing to report about what its
+    // extensions installed.
+    expect(lifecycle.bound).not.toHaveBeenCalled();
+  });
+
   it("shuts down the extensions that did initialize before the bind failed", async () => {
     const session = createFactorySession();
     session.bindExtensions = vi.fn().mockRejectedValue(new Error("bind failed"));
@@ -279,5 +329,130 @@ describe("createSubagentSession — recursion guard", () => {
     await createSubagentSession({ snapshot: STUB_SNAPSHOT, type: "Explore" }, defaultDeps());
 
     expect(session.setActiveToolsByName).not.toHaveBeenCalled();
+  });
+});
+
+describe("createSubagentSession — the core's own child tools", () => {
+  // The SDK applies `tools` as an allowlist *before* building the registry and
+  // runs every `customTools` entry through it, so a custom tool whose name is
+  // missing from the allowlist is dropped with no error (#725). Both halves are
+  // asserted separately so dropping either one fails a test.
+
+  describe("when the run supplies an ask-back recorder", () => {
+    it("appends ask_parent to the allowlist the agent declared", async () => {
+      arrangeFactory();
+
+      await createSubagentSession(
+        { snapshot: STUB_SNAPSHOT, type: "Explore", askParent: vi.fn() },
+        defaultDeps(),
+      );
+
+      expect(io.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ tools: ["read", "ask_parent"] }),
+      );
+    });
+
+    it("passes the ask_parent definition as a custom tool", async () => {
+      arrangeFactory();
+
+      await createSubagentSession(
+        { snapshot: STUB_SNAPSHOT, type: "Explore", askParent: vi.fn() },
+        defaultDeps(),
+      );
+
+      const opts = io.createSession.mock.calls[0][0] as CreateSessionOptions;
+      expect(opts.customTools?.map((tool) => tool.name)).toEqual(["ask_parent"]);
+    });
+
+    it("appends over an agent that declared no tools at all", async () => {
+      arrangeFactory();
+
+      await createSubagentSession(
+        { snapshot: STUB_SNAPSHOT, type: "Explore", askParent: vi.fn() },
+        createSubagentSessionDeps({ io, exec, registry: createAgentLookup({ toolNames: [] }) }),
+      );
+
+      expect(io.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ tools: ["ask_parent"] }),
+      );
+    });
+
+    it("routes a call on the installed tool to the supplied recorder", async () => {
+      arrangeFactory();
+      const askParent = vi.fn<(question: string) => void>();
+
+      await createSubagentSession(
+        { snapshot: STUB_SNAPSHOT, type: "Explore", askParent },
+        defaultDeps(),
+      );
+
+      const opts = io.createSession.mock.calls[0][0] as CreateSessionOptions;
+      await opts.customTools?.[0]?.execute(
+        "tc-1",
+        { question: "Which config wins?" },
+        new AbortController().signal,
+        () => {},
+        STUB_CTX,
+      );
+      expect(askParent).toHaveBeenCalledWith("Which config wins?");
+    });
+  });
+
+  describe("when the run supplies no callbacks", () => {
+    it("leaves the agent's declared allowlist alone", async () => {
+      arrangeFactory();
+
+      await createSubagentSession({ snapshot: STUB_SNAPSHOT, type: "Explore" }, defaultDeps());
+
+      expect(io.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ tools: ["read"] }),
+      );
+    });
+
+    it("installs no custom tools", async () => {
+      arrangeFactory();
+
+      await createSubagentSession({ snapshot: STUB_SNAPSHOT, type: "Explore" }, defaultDeps());
+
+      const opts = io.createSession.mock.calls[0][0] as CreateSessionOptions;
+      expect(opts.customTools).toEqual([]);
+    });
+  });
+});
+
+describe("createSubagentSession — prompt inheritance", () => {
+  /** The inherited-prompt argument the assembler handed the prompt builder. */
+  function inheritedArgument() {
+    return io.assemblerIO.buildAgentPrompt.mock.calls[0]?.[3];
+  }
+
+  it("hands the prompt builder the snapshot's portable parts", async () => {
+    arrangeFactory();
+
+    await createSubagentSession(
+      {
+        snapshot: { ...STUB_SNAPSHOT, portablePrompt: "<project_context>…</project_context>" },
+        type: "Explore",
+      },
+      defaultDeps(),
+    );
+
+    expect(inheritedArgument()?.portablePrompt).toBe("<project_context>…</project_context>");
+  });
+
+  it("applies the strategy the deps' resolver returns", async () => {
+    arrangeFactory();
+
+    await createSubagentSession(
+      { snapshot: STUB_SNAPSHOT, type: "Explore" },
+      createSubagentSessionDeps({
+        io,
+        exec,
+        registry: mockAgentLookup,
+        resolvePromptInheritance: () => "portable",
+      }),
+    );
+
+    expect(inheritedArgument()?.strategy).toBe("portable");
   });
 });

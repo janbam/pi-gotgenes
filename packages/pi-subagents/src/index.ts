@@ -10,11 +10,13 @@
  */
 
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
+  ModelRuntime,
   type ResourceLoader,
   ModelRegistry as SdkModelRegistry,
   SettingsManager as SdkSettingsManager,
@@ -22,14 +24,23 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { AgentTypeRegistry } from "#src/config/agent-types";
 import { loadCustomAgents } from "#src/config/custom-agents";
-import { InterruptHandler, SessionLifecycleHandler, ToolStartHandler } from "#src/handlers/index";
+import { InterruptHandler, SessionLifecycleHandler, WidgetEventsHandler } from "#src/handlers/index";
 import { createChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import { ConcurrencyLimiter } from "#src/lifecycle/concurrency-limiter";
 import { createSubagentSession, type SubagentSessionDeps } from "#src/lifecycle/create-subagent-session";
 import { SubagentManager } from "#src/lifecycle/subagent-manager";
 import { CompositeSubagentObserver } from "#src/observation/composite-subagent-observer";
-import { type NotificationDetails, NotificationManager } from "#src/observation/notification";
-import { createNotificationRenderer } from "#src/observation/renderer";
+import {
+  type NotificationDetails,
+  NotificationManager,
+  type UpdateDetails,
+  type WorkspaceNoticeDetails,
+} from "#src/observation/notification";
+import {
+  createNotificationRenderer,
+  createUpdateRenderer,
+  createWorkspaceNoticeRenderer,
+} from "#src/observation/renderer";
 import { SubagentEventsObserver } from "#src/observation/subagent-events-observer";
 import { createSubagentRuntime } from "#src/runtime";
 import { publishSubagentsService, unpublishSubagentsService } from "#src/service/service";
@@ -39,6 +50,7 @@ import { detectEnv } from "#src/session/env";
 import { resolveModel } from "#src/session/model-resolver";
 import { createExcludedPackagesStorage } from "#src/session/package-exclusions";
 import { buildAgentPrompt } from "#src/session/prompts";
+import { inheritRegisteredProviders } from "#src/session/provider-inheritance";
 import { deriveSubagentSessionDir } from "#src/session/session-dir";
 import { SettingsManager } from "#src/settings";
 import { AgentTool } from "#src/tools/agent-tool";
@@ -51,6 +63,11 @@ import { SubagentsSettingsHandler } from "#src/ui/subagents-settings";
 export default function (pi: ExtensionAPI) {
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>("subagent-notification", createNotificationRenderer());
+  pi.registerMessageRenderer<UpdateDetails>("subagent-update", createUpdateRenderer());
+  pi.registerMessageRenderer<WorkspaceNoticeDetails>(
+    "subagent-workspace-notice",
+    createWorkspaceNoticeRenderer(),
+  );
 
   const registry = new AgentTypeRegistry(() => loadCustomAgents(process.cwd()));
 
@@ -116,13 +133,34 @@ export default function (pi: ExtensionAPI) {
       // it can be tested with plain stubs. Here at the composition root the
       // values really are the SDK objects, so widen those three and let every
       // other option type-check against the SDK signature.
-      createSession: ({ sessionManager, resourceLoader, modelRegistry, ...rest }) =>
-        createAgentSession({
+      createSession: async ({ sessionManager, resourceLoader, modelRegistry, ...rest }) => {
+        // Pi builds the child a fresh ModelRuntime whenever it is not given
+        // one, and runtime registrations live on the instance rather than in
+        // models.json or auth.json — so the child would lose every provider the
+        // parent registered via pi.registerProvider. Build the runtime here
+        // instead and replay those registrations onto it. The child keeps its
+        // own pool, so a child-loaded extension cannot mutate the parent's
+        // (Refs #812). The path derivation mirrors the SDK's own.
+        const childRuntime = await ModelRuntime.create({
+          authPath: join(rest.agentDir, "auth.json"),
+          modelsPath: join(rest.agentDir, "models.json"),
+        });
+        const childRegistry = new SdkModelRegistry(childRuntime);
+        inheritRegisteredProviders(modelRegistry as SdkModelRegistry, {
+          registerNative: (provider) => {
+            childRegistry.registerProvider(provider);
+          },
+          registerConfigured: (id, config) => {
+            childRegistry.registerProvider(id, config);
+          },
+        });
+        return createAgentSession({
           ...rest,
           sessionManager: sessionManager as SessionManager,
           resourceLoader: resourceLoader as ResourceLoader,
-          modelRegistry: modelRegistry as SdkModelRegistry,
-        }),
+          modelRuntime: childRuntime,
+        });
+      },
       assemblerIO: {
         buildAgentPrompt,
       },
@@ -130,6 +168,11 @@ export default function (pi: ExtensionAPI) {
     exec: (cmd, args, opts) => pi.exec(cmd, args, opts),
     registry,
     lifecycle: createChildLifecyclePublisher((channel, data) => pi.events.emit(channel, data)),
+    // Resolved here, at the composition root, so the assembly factory stays
+    // free of the policy and gets a ready-made settings view — the same shape
+    // the extension-exclusion policy reaches it in. It is a resolver rather
+    // than a value because only the assembler knows the child's provider.
+    resolvePromptInheritance: (provider) => settings.promptInheritanceFor(provider),
   };
 
   // ConcurrencyLimiter: schedules background run thunks FIFO against the limit.
@@ -143,6 +186,7 @@ export default function (pi: ExtensionAPI) {
     limiter,
     getRunConfig: () => settings,
     getRetentionPolicy: () => settings,
+    registry,
   });
 
   // Typed service published via Symbol.for() for cross-extension access.
@@ -157,23 +201,39 @@ export default function (pi: ExtensionAPI) {
     unpublishSubagentsService,
   );
 
-  pi.on("session_start", (event, ctx) => lifecycle.handleSessionStart(event, ctx));
-  pi.on("session_before_switch", () => lifecycle.handleSessionBeforeSwitch());
-  pi.on("session_shutdown", () => lifecycle.handleSessionShutdown());
-
   // Live widget: constructed after the manager (it polls listAgents()) and
   // registered as a lifecycle observer so it self-drives its update timer.
   const widget = new AgentWidget(manager, registry);
   observer.add(widget);
 
-  // Grab UI context from first tool execution + clear lingering widget on new turn
-  const toolStart = new ToolStartHandler(widget);
-  pi.on("tool_execution_start", (event, ctx) => toolStart.handleToolExecutionStart(event, ctx));
+  // Give the widget its UI context and its turn ticks. Pi fans an event out to
+  // every handler an extension registers for it, so these take their own
+  // registrations rather than sharing a lambda with an unrelated concern.
+  const widgetEvents = new WidgetEventsHandler(widget);
+
+  pi.on("session_start", (event, ctx) => lifecycle.handleSessionStart(event, ctx));
+  pi.on("session_start", (event, ctx) => widgetEvents.handleSessionStart(event, ctx));
+  pi.on("session_before_switch", () => lifecycle.handleSessionBeforeSwitch());
+  pi.on("session_shutdown", () => lifecycle.handleSessionShutdown());
+  // Registered after the lifecycle handler on purpose. Pi awaits an extension's
+  // handlers for an event in registration order, so the widget is torn down once
+  // `abortAll()` and the awaited `manager.dispose()` have finished — no terminal
+  // transition is left to drive an `update()` at a half-disposed widget.
+  pi.on("session_shutdown", () => widgetEvents.handleSessionShutdown());
+
+  // Capture the prompt parts Pi assembled for the parent's turn. This is the
+  // only event carrying them — `getSystemPromptOptions()` is attached to a
+  // command context, not to the session context the runtime holds — and a spawn
+  // renders the parent's portable identity from the latest capture.
+  pi.on("before_agent_start", (event) => {
+    runtime.setSystemPromptOptions(event.systemPromptOptions);
+  });
 
   // Abort all subagents when the parent agent loop is interrupted (ESC), unless
   // the user has turned that policy off. The predicate is read at abort time.
   const interrupt = new InterruptHandler(manager, () => settings.abortAllOnInterrupt);
   pi.on("turn_start", (_event, ctx) => interrupt.handleTurnStart(ctx));
+  pi.on("turn_start", () => widgetEvents.handleTurnStart());
 
   // ---- Agent tool ----
 
@@ -211,7 +271,6 @@ export default function (pi: ExtensionAPI) {
         registry,
         cwd: ctx.cwd,
         readFile: (path) => readFileSync(path, "utf8"),
-        abort: (id) => manager.abort(id),
       });
     },
   });

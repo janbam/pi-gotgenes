@@ -88,7 +88,7 @@ export class AgentWidget implements SubagentManagerObserver {
     private registry: AgentTypeRegistry,
   ) {}
 
-  /** Set the UI context (grabbed from first tool execution). */
+  /** Set the UI context (captured at session_start). */
   setUICtx(ctx: UICtx) {
     if (ctx !== this.uiCtx) {
       // UICtx changed — the widget registered on the old context is gone.
@@ -101,7 +101,7 @@ export class AgentWidget implements SubagentManagerObserver {
   }
 
   /**
-   * Called on each new turn (tool_execution_start).
+   * Called on each new turn (turn_start).
    * Ages finished agents and clears those that have lingered long enough.
    */
   onTurnStart() {
@@ -128,6 +128,15 @@ export class AgentWidget implements SubagentManagerObserver {
   /** A subagent completed — render so the finished state is seeded and shown. */
   onSubagentCompleted(_record: Subagent) {
     this.update();
+  }
+
+  /**
+   * A subagent went back to running — ensure the loop is live and render.
+   * `startLoop` rather than `update`: the timer stops once nothing is running,
+   * and a resumed agent is running again.
+   */
+  onSubagentResuming(_record: Subagent) {
+    this.startLoop();
   }
 
   /** A subagent finished a resume — render so the refreshed result is shown. */
@@ -163,9 +172,13 @@ export class AgentWidget implements SubagentManagerObserver {
    * Foreground runs are rendered by the `subagent` tool's inline `onUpdate` stream,
    * so funneling both `listAgents()` call sites through this accessor applies the
    * background predicate exactly once at the source.
+   *
+   * The predicate reads the record's own resolved mode. It formerly re-derived
+   * it from a per-call display snapshot only the tool door ever built — so every
+   * SDK-spawned agent was filtered out permanently (#724).
    */
   private listBackgroundAgents(): Subagent[] {
-    return this.manager.listAgents().filter(record => record.invocation?.runInBackground === true);
+    return this.manager.listAgents().filter(record => record.isBackground);
   }
 
   /** Project a live Subagent record onto a pure-data WidgetAgent snapshot. */
@@ -293,7 +306,15 @@ export class AgentWidget implements SubagentManagerObserver {
     }
   }
 
-  // fallow-ignore-next-line unused-class-member
+  /**
+   * Release everything the widget acquired: the update interval and both
+   * registrations on the session's `UICtx`.
+   *
+   * Disposal is final. Dropping the `UICtx` makes `update()` return at its
+   * first line, so a notification arriving afterwards — the terminal transition
+   * an abort drives synchronously — cannot re-register what this released.
+   * `setUICtx()` re-arms the widget if a context ever arrives again.
+   */
   dispose() {
     if (this.widgetInterval) {
       clearInterval(this.widgetInterval);
@@ -303,6 +324,7 @@ export class AgentWidget implements SubagentManagerObserver {
       this.uiCtx.setWidget("agents", undefined);
       this.uiCtx.setStatus("subagents", undefined);
     }
+    this.uiCtx = undefined;
     this.widgetRegistered = false;
     this.tui = undefined;
     this.lastStatusText = undefined;

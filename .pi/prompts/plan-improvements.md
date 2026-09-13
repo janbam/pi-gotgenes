@@ -43,7 +43,7 @@ Note:
 Determine the next phase number N (last completed phase + 1), then immediately call `set_session_name` with `$1 — Phase N Planning` so the session is labelled for the rest of the work.
 
 **Hard gate — the previous phase must be archived first.**
-If Phase N−1's full detailed roadmap (numbered steps with `Outcome:` lines and a dependency diagram) is still inline in `architecture.md` rather than archived to a `history/phase-(N−1)-<slug>.md` file with only a "Refactoring history" table row left behind, stop and tell the user to run `/finish-phase $1` first, then resume `/plan-improvements $1`.
+If Phase N−1's full detailed roadmap (its steps with `Outcome:` lines and a dependency diagram) is still inline in `architecture.md` rather than archived to a `history/phase-(N−1)-<slug>.md` file with only a "Refactoring history" table row left behind, stop and tell the user to run `/finish-phase $1` first, then resume `/plan-improvements $1`.
 Archiving the prior phase — with its step-completion gate and doc reconciliation — is `/finish-phase`'s job; do not do it inline here.
 
 A declared direction for Phase N most often lives **not** in `architecture.md` but in the previous phase's history file — `history/phase-(N−1)-<slug>.md`, whose **Findings** section is where `/finish-phase` records the "leading Phase N candidate."
@@ -51,10 +51,13 @@ Read that history file's Findings before deep-tracing.
 If it (or `architecture.md`) already declares a direction, treat it as a hypothesis, not a commitment — but put the declared candidate in front of the user in your **first** `ask_user`, up front, not a follow-up: a declared candidate surfaced late forces a second round-trip after the composition is already drafted.
 When no explicit candidate line exists, the history file still carries **implicit candidates**: a ⚠️ metric miss recorded in its health-metrics table, and any "deferred" remark inside a step's Landed notes — treat both as declared-candidate carriers with the same first-`ask_user` treatment.
 Every ⚠️ metric miss in the prior history file gets an explicit disposition in the new roadmap — re-target it, accept it with recorded rationale, or supersede it — never a silent drop (Phase 21 planning silently dropped one; this rule closes that gap).
+A phase triggered mid-lifecycle carries its candidate in a **third** location: when an operator decides during an issue's planning that a phase should open before that issue's implementation, the session records the candidate cause under a `#### Phase handoff` heading in the issue retro.
+Sweep for it — `grep -rn -e '#### Phase handoff' -e 'phase opens before implementation' packages/$1/docs/retro/` (the second pattern catches pre-convention notes) — and give any hit the same first-`ask_user` treatment (Phase 22's declared candidate lived only in an issue retro's ad-hoc sequencing note and surfaced by luck).
 Let the discovery findings decide.
 
 Before touching any tool, write down a **cause hypothesis**: the first-principles structural problem you expect the next phase to dissolve (structural fusion, a coupling/boundary flaw, a dead subsystem), read against the architecture doc's first-principles section.
 The later steps corroborate, refine, or refute it — they do not replace it.
+When discovery refutes the hypothesis because the doc prose that spawned it is stale — it describes a state a completed phase already changed — fix or flag that prose in the roadmap commit, mirroring Step 2's drift rule; leaving it plants the same wrong hypothesis for the next planner (Phase 22's initial hypothesis came from a first-principles sentence Phase 18 had already resolved).
 A cause-level finding must trace to a named target concept in the architecture doc's first-principles section; when no such section exists, writing one — naming the organizing concept and recording resolved design directions — is itself a phase deliverable.
 
 ### Step 2: Sweep open issues
@@ -69,7 +72,10 @@ Cross-check each open issue against the architecture doc's claims about which is
 An open issue that already names a cause-level finding is a **pre-discovered candidate** — adopt it as a phase step under its existing number rather than re-deriving or re-filing it (Phase 21's two strongest steps were adopted this way).
 Read each labeled issue's body before counting it in scope: a package label is sometimes contextual (the body targets another package), and a mislabeled issue must not pull cross-package work into the phase.
 When the sweep exposes doc/tracker drift in prose outside the roadmap sections (e.g. a stale "remaining open issues" claim), fix it in the roadmap commit rather than leaving it for the next reader.
+Sweep open pull requests too: `gh pr list --state open`, reading any whose title or changed files touch `packages/$1/` — this repo reimplements adopted external PRs rather than merging them, so an open PR is a pre-discovered candidate or a step's close target, never noise (three Phase 22 steps cite open PRs that surfaced only because issue bodies happened to mention them).
+Record each relevant PR's disposition alongside the issue it serves.
 Track repeat deferrals: an issue swept as out-of-scope across multiple consecutive phases (check the prior phase retros/roadmaps) gets an explicit decision this phase — schedule it, or recommend closing it as not-planned — never a silent re-defer.
+State the ordinal in the disposition itself — each deferral bullet carries its consecutive-sweep count (`2nd consecutive sweep`) so the next phase reads the count instead of re-deriving it from prior archives.
 Surface each repeat-deferral as an explicit `ask_user` decision (schedule / defer-with-recorded-rationale / close as not-planned), not a self-made call — these are preference-sensitive judgments the user should own; bundle them into the Step 8 composition `ask_user`, not separate round-trips.
 Record the sweep's verdicts under the `#### Open-issue sweep dispositions` heading the Output section prescribes — mid-phase filing sites and `/finish-phase` both append to and grep that exact heading.
 
@@ -148,7 +154,7 @@ Identify dependency ordering and parallel tracks.
 If discovery surfaced no cause-level finding (Category A–C — structural fusion, coupling/boundary flaws, dead subsystems) and the candidate list is polish-only (Category B unit-size, Category D, Category E, Category G symptoms), do not manufacture a full phase — but split the "polish" verdict before defaulting to defer, using the craftsmanship scout's concentrated/scattered flags:
 
 - **Scattered trivia** (isolated findings across cold, low-churn files) → present **"defer"** as a first-class `ask_user` option.
-  This work belongs to the boy-scout rule in the implementation prompts (the `tidy-first` skill), not a planned phase.
+  This work belongs to the boy-scout rule in `/plan-issue`'s Tidy-First assessment (the `tidy-first` skill), which picks it up whenever a change touches those files, not a planned phase.
 - **Concentrated quality/test debt in a hot area** (3+ scout findings clustered in one churn hotspot or one oversized test file) → present a **"craftsmanship lean phase"** (spine: "pay down concentrated debt in `<area>`") as a first-class `ask_user` option alongside defer.
   This is legitimate Beck/Metz craftsmanship, not filler.
 
@@ -167,11 +173,27 @@ The deferral gate decides whether _this_ phase exists; the trajectory decides wh
 **Track composition.**
 When the surviving candidates span multiple independent tracks (a spine plus unrelated parallel work), offer the composition to the user via `ask_user` (a multi-select over the tracks) rather than committing to a fixed set — track selection is preference-sensitive (scope vs. focus), and the user may want to drop or add a track before you draft the steps.
 Bundle the first `ask_user`: the declared candidate, the track composition, the repeat-deferral dispositions, and (when the trajectory check fires) the cadence question belong in one call — one round-trip, not four.
+That call also carries the **filing confirmation**, because a step is identified by its issue number and the issues must therefore exist before the roadmap can be written.
+Approving the composition approves filing its issues.
+Declining ends the run: report the proposed composition and write no roadmap, so there is no half-finished document to clean up.
 
 **Feasibility probe.**
 Before committing any step whose outcome claim depends on the SDK/type surface (e.g. "remove the file-level `eslint-disable` once the SDK exports usable types"), confirm the named type or export actually exists in the real surface (SDK `.d.ts`, `--help`, schema).
 Do not commit an outcome the surface cannot deliver — this mirrors the AGENTS.md rule that a named remediation in a migration note must be verified against the real surface.
-For an SDK **UI or behavioral** capability (not just "does this method exist"), confirm the behavior in the Pi core source (`~/development/pi/pi`) and a sibling extension that already uses it, not only the exported type — a `.d.ts` says a method exists but not that it behaves the way the step needs (e.g. `ctx.ui.custom` renders inline by default only per the core's `overlay ?? false`, invisible in the type signature).
+For an SDK **UI or behavioral** capability (not just "does this method exist"), confirm the behavior in the Pi core source (`../pi`, or `../../pi` from a worktree) and a sibling extension that already uses it, not only the exported type — a `.d.ts` says a method exists but not that it behaves the way the step needs (e.g. `ctx.ui.custom` renders inline by default only per the core's `overlay ?? false`, invisible in the type signature).
+
+## File the issues
+
+A step is identified by its GitHub issue number, so the issues are filed **before** the roadmap is written — there is no link-back pass and no second commit.
+Steps adopted from already-filed issues need no new issue; file only the steps without one, and when every step adopts an existing issue there is nothing to file at all.
+
+1. Load the `github-voice` skill, then file the issues **one `gh issue create --label "enhancement,pkg:$1"` call per issue**, with the title and `--body-file` paired literally in the same command — never via shell-array index arithmetic (the shell is zsh; its 1-indexed arrays silently shift titles relative to bodies).
+   A `bug`-typed step keeps the `bug` label instead of `enhancement`.
+   Run `gh` from the repo root (it must execute inside the repository).
+   Use the repo's `## What` / `## Why` / `## Proposed change` / `## Context` sections.
+   File in dependency order, so a body can cite an earlier-filed sibling by number; refer to a sibling filed **later** in prose (by title or by what it does), since it has no number yet.
+2. Verify each created issue's title matches its body before continuing.
+3. Record the number each step will carry into the roadmap write below.
 
 ## Output
 
@@ -185,18 +207,31 @@ The section should include:
    Prefer cause-level metrics recomputable by a single command (a `grep -c`, `wc -l`, or fallow field) and record the recompute command with the metric, so `/finish-phase` can verify delivered vs. predicted deterministically.
    When a metric greps for a symbol or filename the phase has not created yet (a predicted name), the step whose work creates it must either use the roadmap's name or update the metric row in the same commit — note this on that step, or a rename silently breaks `/finish-phase`'s recompute.
    Run each recompute command before committing and confirm it reproduces the stated baseline — a wrong command silently breaks `/finish-phase`'s delivered-vs-predicted verification.
-2. Numbered steps with:
-   - Title
+   A command containing `|` cannot sit in a table cell verbatim: the cell requires `\|`, so the raw source — what `/finish-phase` copies and runs — carries a corrupted command.
+   Prefer pipe-free forms (`grep -c`, multiple `-e` patterns, a single-path `grep -rc`); when a pipeline is unavoidable, put the command in a fenced block below the table and point the row at it.
+2. Steps, in working-sequence order — the section order _is_ the sequence, so nothing is numbered — each with:
+   - Title, in a `#### [#N] Title` heading carrying the step's issue number as its identity (`#### [#N] Title (with [#M])` when a step absorbs a folded-in issue)
    - **Cause** — the first-principles structural cause the step dissolves, named explicitly; a fallow signal is cited as the _symptom_ of that cause, never as the step's motivation (a step justified only by a fallow finding is symptom-driven — trace it to a cause or drop it).
    - Target files/functions — when a step extracts or moves code and a domain directory applies (Step 6), name the destination path (e.g. `src/<domain>/<file>.ts`) so directory placement rides along with the change rather than landing flat and being moved later.
    - Smell category addressed
    - Expected measurable outcome
    - **Impact / Risk / Priority** — the per-step scores (`Priority = Impact × (6 − Risk)`), published on the step so the ranking is auditable in the committed roadmap and at `/plan-issue` time, not left in the session transcript.
    - A `Release:` tag on its own line — `Release: independent` or `Release: batch "<batch-name>"` (see the `improvement-discovery` skill's Output format).
-3. Step dependency diagram (Mermaid flowchart).
-4. Named parallel tracks.
-5. A `Release batches` subsection (after the parallel tracks) naming each batch, its member steps in dependency order (last listed = tail), and the independently releasable steps.
+3. Step dependency diagram (Mermaid flowchart), laid out by dependency rather than by sequence, with `S<issue>` node IDs and the bare issue number in the label (`S857["✅ #857<br/>Workspace-backed resume"]`) — that bare number is what `/tdd-plan`'s and `/build-plan`'s `✅`-mark verification counts.
+4. Named parallel tracks, naming their members as `[#N]`.
+5. A `Release batches` subsection (after the parallel tracks) naming each batch, its member steps as `[#N]` in dependency order (last listed = tail), and the independently releasable steps.
    This is the deterministic source `/plan-issue` reads to recommend a release decision — keep it grep-able, not prose.
+
+Add a reference-link definition for every `[#N]` at the end of the file, then verify every `[#N]` reference resolves to one — `rumdl`'s MD053 flags _unused_ definitions but not _missing_ ones, so a dangling reference inherited from a prior phase's summary passes lint silently.
+
+Then check the roadmap you just wrote against its own published inputs:
+
+```bash
+./scripts/roadmap-check.mjs $1
+```
+
+Resolve every **error** before going further — each one reads a strictly-formatted field, so it is a defect in what you wrote rather than a judgement call: a `Priority` that does not follow from its own `Impact` and `Risk`, a missing or unrecognized `Release:` tag, a batch name with no bullet, a step missing from the diagram, or a dependency cycle.
+Read the **warnings** and fix the ones that are wrong: a step named in no track or no release batch is usually an omission, and a `**Hard dependency:**` bullet disagreeing with the diagram means one of the two is stale.
 
 After writing the plan, present a summary to the user and ask whether to commit.
 If confirmed, commit with:
@@ -207,22 +242,7 @@ git commit -m "docs($1): propose Phase N improvement roadmap"
 git push
 ```
 
-## File the issues
-
-The roadmap is not done until each step has a GitHub issue and the document links back to it.
-After the plan is committed, ask whether to file the issues now; if confirmed:
-
-1. Steps adopted from already-filed issues need no new issue — skip creation and link the existing number; file only the steps without one.
-   Load the `github-voice` skill, then file the issues **one `gh issue create --label "enhancement,pkg:$1"` call per issue**, with the title and `--body-file` paired literally in the same command — never via shell-array index arithmetic (the shell is zsh; its 1-indexed arrays silently shift titles relative to bodies).
-   A `bug`-typed step keeps the `bug` label instead of `enhancement`.
-   Run `gh` from the repo root (it must execute inside the repository).
-   Use the repo's `## What` / `## Why` / `## Proposed change` / `## Context` sections, referencing cross-step dependencies as "Phase N Step M" prose, not hardcoded numbers (the issue numbers are not known until filed).
-2. Verify each created issue's title matches its body before continuing.
-3. Link the doc back: append `([#N])` to each step heading, add `(#N)` to each Mermaid node, and add reference-link definitions at the end of the file.
-   Then verify every `[#N]` reference in the file resolves to a matching `[#N]:` definition — `rumdl`'s MD053 flags _unused_ definitions but not _missing_ ones, so a dangling reference inherited from a prior phase's summary passes lint silently; add any missing definitions while you are in the file.
-4. Commit with `docs($1): link Phase N roadmap steps to issues #A-#B` and push.
-
-Finally, restate the recommended working sequence: list the issues as `#N — title` lines in dependency order (a topological order of the step diagram), noting which can proceed in parallel and which are blocked until an earlier one lands.
+Finally, restate the recommended working sequence: list the issues as `#N — title` lines in the roadmap's section order, noting which can proceed in parallel and which are blocked until an earlier one lands.
 
 ## Write planning notes
 

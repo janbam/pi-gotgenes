@@ -10,11 +10,13 @@ function makeDelegate(): SubagentManagerObserver {
 		onSubagentCreated: vi.fn(),
 		onSubagentCompleted: vi.fn(),
 		onSubagentResumed: vi.fn(),
+		onSubagentResuming: vi.fn(),
 		onSubagentCompacted: vi.fn(),
 	};
 }
 
 const COMPACTION: CompactionInfo = { reason: "threshold", tokensBefore: 1000 };
+const NOTICE = "\n\n---\nChanges saved to branch `pi-agent-10`.";
 
 describe("CompositeSubagentObserver", () => {
 	describe("fan-out", () => {
@@ -64,6 +66,18 @@ describe("CompositeSubagentObserver", () => {
 
 			expect(a.onSubagentResumed).toHaveBeenCalledExactlyOnceWith(record);
 			expect(b.onSubagentResumed).toHaveBeenCalledExactlyOnceWith(record);
+		});
+
+		it("forwards onSubagentResuming to every delegate with the record", () => {
+			const a = makeDelegate();
+			const b = makeDelegate();
+			const composite = new CompositeSubagentObserver([a, b]);
+			const record = createTestSubagent({ id: "agent-3c" });
+
+			composite.onSubagentResuming(record);
+
+			expect(a.onSubagentResuming).toHaveBeenCalledExactlyOnceWith(record);
+			expect(b.onSubagentResuming).toHaveBeenCalledExactlyOnceWith(record);
 		});
 
 		it("forwards onSubagentCompacted to every delegate with record and info", () => {
@@ -122,6 +136,52 @@ describe("CompositeSubagentObserver", () => {
 
 			expect(() => composite.onSubagentStarted(record)).not.toThrow();
 			expect(after.onSubagentStarted).toHaveBeenCalledExactlyOnceWith(record);
+		});
+	});
+
+	describe("an optional hook only some delegates implement", () => {
+		it("forwards onSubagentUpdate to the delegates that implement it", () => {
+			const a = { ...makeDelegate(), onSubagentUpdate: vi.fn() };
+			const b = { ...makeDelegate(), onSubagentUpdate: vi.fn() };
+			const composite = new CompositeSubagentObserver([a, b]);
+			const record = createTestSubagent({ id: "agent-9" });
+
+			composite.onSubagentUpdate(record, "Course change.");
+
+			expect(a.onSubagentUpdate).toHaveBeenCalledExactlyOnceWith(record, "Course change.");
+			expect(b.onSubagentUpdate).toHaveBeenCalledExactlyOnceWith(record, "Course change.");
+		});
+
+		it("skips a delegate that does not implement it, and still reaches the rest", () => {
+			const widgetLike = makeDelegate(); // no onSubagentUpdate, like AgentWidget
+			const listening = { ...makeDelegate(), onSubagentUpdate: vi.fn() };
+			const composite = new CompositeSubagentObserver([widgetLike, listening]);
+			const record = createTestSubagent({ id: "agent-9" });
+
+			expect(() => composite.onSubagentUpdate(record, "Course change.")).not.toThrow();
+			expect(listening.onSubagentUpdate).toHaveBeenCalledExactlyOnceWith(record, "Course change.");
+		});
+
+		it("forwards onSubagentWorkspaceNotice to the delegates that implement it", () => {
+			const a = { ...makeDelegate(), onSubagentWorkspaceNotice: vi.fn() };
+			const b = { ...makeDelegate(), onSubagentWorkspaceNotice: vi.fn() };
+			const composite = new CompositeSubagentObserver([a, b]);
+			const record = createTestSubagent({ id: "agent-10" });
+
+			composite.onSubagentWorkspaceNotice(record, NOTICE);
+
+			expect(a.onSubagentWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(record, NOTICE);
+			expect(b.onSubagentWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(record, NOTICE);
+		});
+
+		it("skips a workspace-notice delegate that does not implement it", () => {
+			const widgetLike = makeDelegate(); // no onSubagentWorkspaceNotice, like AgentWidget
+			const listening = { ...makeDelegate(), onSubagentWorkspaceNotice: vi.fn() };
+			const composite = new CompositeSubagentObserver([widgetLike, listening]);
+			const record = createTestSubagent({ id: "agent-10" });
+
+			expect(() => composite.onSubagentWorkspaceNotice(record, NOTICE)).not.toThrow();
+			expect(listening.onSubagentWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(record, NOTICE);
 		});
 	});
 });

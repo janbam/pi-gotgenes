@@ -5,6 +5,308 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [21.7.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.6.0...pi-subagents-v21.7.0) (2026-09-11)
+
+
+### Features
+
+* **pi-subagents:** show subagent results compactly, expandable with Ctrl+O ([46dc3f0](https://github.com/gotgenes/pi-packages/commit/46dc3f0e98fa19821be68c52aaba9b326ba0fba4)), closes [#636](https://github.com/gotgenes/pi-packages/issues/636)
+
+### Documentation
+
+* **pi-subagents:** document the compact result presentation ([b5a4a86](https://github.com/gotgenes/pi-packages/commit/b5a4a86a4df6d3bae7e346f5bf8caecb759dd945))
+
+## [21.6.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.5.1...pi-subagents-v21.6.0) (2026-09-11)
+
+
+### Features
+
+* **pi-subagents:** let an extension resume a subagent through the service ([0e15734](https://github.com/gotgenes/pi-packages/commit/0e157344ac5a6b00ded9db6228a8437d185ba8ba)), closes [#885](https://github.com/gotgenes/pi-packages/issues/885)
+* **pi-subagents:** emit an event when a subagent resume starts ([315640c](https://github.com/gotgenes/pi-packages/commit/315640c2d7c783a97543d47a568d6d44d76d6499)), closes [#832](https://github.com/gotgenes/pi-packages/issues/832)
+
+### Bug Fixes
+
+* **pi-subagents:** refuse to resume an agent that is still running ([5853ec0](https://github.com/gotgenes/pi-packages/commit/5853ec07430234cc4ff3bb3b994fe951bc6432c5)), closes [#896](https://github.com/gotgenes/pi-packages/issues/896)
+
+### Documentation
+
+* **pi-subagents:** document the service resume door and the resuming event ([1ac3bd0](https://github.com/gotgenes/pi-packages/commit/1ac3bd0ae8fa9e991505a90071d0889279c1dfe9))
+
+## [21.5.1](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.5.0...pi-subagents-v21.5.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **pi-subagents:** deliver each mid-run update once, on the channel that can reach the parent ([673c265](https://github.com/gotgenes/pi-packages/commit/673c2651b798d64217b201cddf0ee2e33d6e3976)), closes [#903](https://github.com/gotgenes/pi-packages/issues/903)
+
+### Documentation
+
+* **pi-subagents:** state where a mid-run update lands ([e00026a](https://github.com/gotgenes/pi-packages/commit/e00026a3a63e810ddf7a3e5d8329ae9917211f9b)), closes [#903](https://github.com/gotgenes/pi-packages/issues/903)
+
+## [21.5.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.7...pi-subagents-v21.5.0) (2026-09-08)
+
+
+### Features
+
+* **pi-subagents:** inherit only portable prompt parts on a re-homing provider ([dba4899](https://github.com/gotgenes/pi-packages/commit/dba48999a8f6eaf7b76a3d471e9b7ddebe1eb35a)), closes [#883](https://github.com/gotgenes/pi-packages/issues/883), closes [#884](https://github.com/gotgenes/pi-packages/issues/884)
+
+### Documentation
+
+* **pi-subagents:** document provider-scoped portable prompt inheritance ([8f98318](https://github.com/gotgenes/pi-packages/commit/8f983184d94cd08406954c296a67fd3cbbd58701)), closes [#883](https://github.com/gotgenes/pi-packages/issues/883), closes [#884](https://github.com/gotgenes/pi-packages/issues/884)
+
+## [21.4.7](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.6...pi-subagents-v21.4.7) (2026-09-08)
+
+
+### Bug Fixes
+
+* **pi-subagents:** stop telling a child to use tools it does not have ([e3f31b3](https://github.com/gotgenes/pi-packages/commit/e3f31b3e3cf75714d7d5b5fa520301ff34734637)), closes [#890](https://github.com/gotgenes/pi-packages/issues/890)
+
+### Documentation
+
+* record that the inherited region is shared parts, not shared bytes ([#890](https://github.com/gotgenes/pi-packages/issues/890)) ([5755a9a](https://github.com/gotgenes/pi-packages/commit/5755a9a8ea34bf5c7e08a4cb8abc988c12eb3a59))
+* correct the sub-agent bridge description and the header-match residual ([#890](https://github.com/gotgenes/pi-packages/issues/890)) ([b0db764](https://github.com/gotgenes/pi-packages/commit/b0db764e0ffa484eb18bad2883710e77d93ec99b)), closes [#890](https://github.com/gotgenes/pi-packages/issues/890)
+
+## [21.4.6](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.5...pi-subagents-v21.4.6) (2026-09-08)
+
+
+### Bug Fixes
+
+* **pi-subagents:** report a child run whose failed compaction erased the turn error ([8333fc6](https://github.com/gotgenes/pi-packages/commit/8333fc6468958e4d90ff71651cddb1acc2929186)), closes [#898](https://github.com/gotgenes/pi-packages/issues/898)
+* **pi-subagents:** keep reporting a failed turn when a later call runs no turn ([c3a5348](https://github.com/gotgenes/pi-packages/commit/c3a5348553acc3608224f3760566ea72b907c076)), closes [#898](https://github.com/gotgenes/pi-packages/issues/898)
+
+## [21.4.5](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.4...pi-subagents-v21.4.5) (2026-09-07)
+
+
+### Bug Fixes
+
+* **pi-subagents:** stop rendering an empty subagent result as nothing ([e6f4a8d](https://github.com/gotgenes/pi-packages/commit/e6f4a8d1443d8840c44fb88c7af23d9c8e38ad5b)), closes [#889](https://github.com/gotgenes/pi-packages/issues/889)
+* **pi-subagents:** fail a child run whose provider errored ([3d29780](https://github.com/gotgenes/pi-packages/commit/3d29780b9485d88c183e7b5a0e6cfe9891c901c0)), closes [#889](https://github.com/gotgenes/pi-packages/issues/889)
+* **pi-subagents:** fail a resumed child run whose provider errored ([7851905](https://github.com/gotgenes/pi-packages/commit/7851905d8b2a5f76d5ce20f36abd58c9c7a27fa8)), closes [#889](https://github.com/gotgenes/pi-packages/issues/889)
+* **pi-subagents:** name the transcript when a foreground agent fails ([75712e0](https://github.com/gotgenes/pi-packages/commit/75712e0d2867ec9d8e95d7f050a4c7ae9dc19ecd)), closes [#889](https://github.com/gotgenes/pi-packages/issues/889)
+
+## [21.4.4](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.3...pi-subagents-v21.4.4) (2026-09-07)
+
+
+### Bug Fixes
+
+* **pi-subagents:** report an unanswerable question without naming a resume ([fba1f81](https://github.com/gotgenes/pi-packages/commit/fba1f8150e1c253d7a73ea92c61aed92390af599)), closes [#878](https://github.com/gotgenes/pi-packages/issues/878)
+
+### Documentation
+
+* **pi-subagents:** record what a result promises about resuming ([48cb44a](https://github.com/gotgenes/pi-packages/commit/48cb44a2390de9aec0118d148971d92fc1bf4c8c)), closes [#878](https://github.com/gotgenes/pi-packages/issues/878)
+* **pi-subagents:** qualify the ask-back module's resume promise ([b9a39b7](https://github.com/gotgenes/pi-packages/commit/b9a39b75a4ae8d288ea8534bcdabb56fe7d069a7)), closes [#878](https://github.com/gotgenes/pi-packages/issues/878)
+
+## [21.4.3](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.2...pi-subagents-v21.4.3) (2026-09-06)
+
+
+### Bug Fixes
+
+* **pi-subagents:** deliver a child's update with the result when its parent is blocked ([d36bfcf](https://github.com/gotgenes/pi-packages/commit/d36bfcf1d9f13e5dbf2dd82ffa01d370f49c2f48)), closes [#872](https://github.com/gotgenes/pi-packages/issues/872)
+
+### Documentation
+
+* **pi-subagents:** state the update channel's rationale as claim-based ([450470d](https://github.com/gotgenes/pi-packages/commit/450470d598cd944f87b72b04ae6bf0f7d5a8b968)), closes [#872](https://github.com/gotgenes/pi-packages/issues/872)
+
+## [21.4.2](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.1...pi-subagents-v21.4.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **pi-subagents:** resolve tools: none to no tools ([a4a2eae](https://github.com/gotgenes/pi-packages/commit/a4a2eae9e8ec7e5725b765083b4ceadde84975cd)), closes [#871](https://github.com/gotgenes/pi-packages/issues/871)
+
+## [21.4.1](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.4.0...pi-subagents-v21.4.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **pi-subagents:** tell the parent where a failed child's work was saved ([cf71b16](https://github.com/gotgenes/pi-packages/commit/cf71b161e8d83b2ddf9255ab57e4fdc3f8a3fd7e)), closes [#870](https://github.com/gotgenes/pi-packages/issues/870)
+* **pi-subagents:** announce where a late-disposed child's work was saved ([3747d66](https://github.com/gotgenes/pi-packages/commit/3747d667a98efe175e471eb1afe8a9ec3cc1b388)), closes [#870](https://github.com/gotgenes/pi-packages/issues/870)
+
+## [21.4.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.3.0...pi-subagents-v21.4.0) (2026-09-03)
+
+
+### Features
+
+* **pi-subagents:** give the session transcript four more rows of its own ([243bdb2](https://github.com/gotgenes/pi-packages/commit/243bdb21b680b80e1763417cfd78885b0f4c6c39)), closes [#733](https://github.com/gotgenes/pi-packages/issues/733)
+* **pi-subagents:** size the session transcript pane to its content ([d0dfe78](https://github.com/gotgenes/pi-packages/commit/d0dfe7860644ed3c032aa2b6efafe122026bf778)), closes [#733](https://github.com/gotgenes/pi-packages/issues/733)
+
+### Bug Fixes
+
+* **pi-subagents:** stop the session transcript viewer painting into scrollback ([fdb8eb2](https://github.com/gotgenes/pi-packages/commit/fdb8eb2baeee06b35d0451603407f15f68641306)), closes [#733](https://github.com/gotgenes/pi-packages/issues/733)
+
+## [21.3.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.2.2...pi-subagents-v21.3.0) (2026-09-03)
+
+
+### Features
+
+* **pi-subagents:** let a child ask its parent a question with a tool ([fc0200c](https://github.com/gotgenes/pi-packages/commit/fc0200c1464a6e124a9a3eebb48dde15032c79f9)), closes [#858](https://github.com/gotgenes/pi-packages/issues/858)
+* **pi-subagents:** let a running background child send its parent an update ([805d73d](https://github.com/gotgenes/pi-packages/commit/805d73deb33510a9e976fa4c8608e3d8582afac9)), closes [#858](https://github.com/gotgenes/pi-packages/issues/858)
+
+### Bug Fixes
+
+* **pi-subagents:** keep a child's session alive while its question is unanswered ([21a66b9](https://github.com/gotgenes/pi-packages/commit/21a66b9ab7cfe0389c8af853b469cafd02d0dca3)), closes [#858](https://github.com/gotgenes/pi-packages/issues/858)
+
+### Documentation
+
+* **pi-subagents:** document the child-to-parent tools and narrow the tool-widening boundary ([617f30d](https://github.com/gotgenes/pi-packages/commit/617f30dd39bc11534c27c20ccaea775dd6493bde)), closes [#858](https://github.com/gotgenes/pi-packages/issues/858)
+
+## [21.2.2](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.2.1...pi-subagents-v21.2.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* **pi-subagents:** keep a question-ending child's workspace alive for its resume ([88572ef](https://github.com/gotgenes/pi-packages/commit/88572eff8ad195a685c14b5af49c9e5dd72a5ad5)), closes [#857](https://github.com/gotgenes/pi-packages/issues/857)
+* **pi-subagents:** refuse a resume into a workspace that no longer exists ([369e397](https://github.com/gotgenes/pi-packages/commit/369e3970c9acacd6674313fc6907256060553453)), closes [#857](https://github.com/gotgenes/pi-packages/issues/857)
+
+## [21.2.1](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.2.0...pi-subagents-v21.2.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **pi-subagents:** tear the agent widget down on session shutdown ([a9a7a63](https://github.com/gotgenes/pi-packages/commit/a9a7a6302880aa3b405585ca3784ff56eecc0477)), closes [#849](https://github.com/gotgenes/pi-packages/issues/849)
+
+### Documentation
+
+* **pi-permission-system:** record the fact-shaping inheritance rule (ADR 0012) ([dbdd9f1](https://github.com/gotgenes/pi-packages/commit/dbdd9f19f29a1a67d282fdc050a71b462021eb56))
+
+### Miscellaneous Chores
+
+* upgrade lint tooling and pin rumdl below the MD013 reflow regression ([0ee1ad8](https://github.com/gotgenes/pi-packages/commit/0ee1ad886815e6e50d99f66050fbbcf5a9f0319a)), closes [#866](https://github.com/gotgenes/pi-packages/issues/866)
+* upgrade fallow to 3.22.0 ([1b2a562](https://github.com/gotgenes/pi-packages/commit/1b2a5620bf5d7f1014676b47e58df8b43ff00496)), closes [#866](https://github.com/gotgenes/pi-packages/issues/866)
+
+<!-- Entries below this point were generated by release-please, which this
+     repository used until 2026-09. Some record releases made in the
+     packages' predecessor repositories, before the monorepo existed. See
+     docs/decisions/0002-git-cliff-release-automation.md. -->
+
+## [21.2.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.1.0...pi-subagents-v21.2.0) (2026-09-01)
+
+
+### Features
+
+* **pi-subagents:** let a subagent ask its parent a question it can answer ([81863e4](https://github.com/gotgenes/pi-packages/commit/81863e414e2cc1f3f6cea1f15083e5dc4c33da53)), closes [#465](https://github.com/gotgenes/pi-packages/issues/465)
+
+
+### Bug Fixes
+
+* **pi-subagents:** ignore a marker a subagent quotes inline when asking nothing ([2888c0f](https://github.com/gotgenes/pi-packages/commit/2888c0fda6db3054df7802290de25ab55372a9b2)), closes [#465](https://github.com/gotgenes/pi-packages/issues/465)
+* **pi-subagents:** keep question parsing linear on heavily quoted results ([c902c9a](https://github.com/gotgenes/pi-packages/commit/c902c9aaa419ac565e6abfc1e30e2ff22c591a42)), closes [#465](https://github.com/gotgenes/pi-packages/issues/465)
+* **pi-subagents:** report foreground subagent completions to lifecycle observers ([b85253c](https://github.com/gotgenes/pi-packages/commit/b85253c0e5dfe6483ae4dfb0f1e075557a35f39e)), closes [#465](https://github.com/gotgenes/pi-packages/issues/465)
+* **pi-subagents:** report terminal status consistently across every result carrier ([27cf361](https://github.com/gotgenes/pi-packages/commit/27cf361b26483ec389c8a73cc0666c148ff500db)), closes [#465](https://github.com/gotgenes/pi-packages/issues/465)
+
+## [21.1.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.0.3...pi-subagents-v21.1.0) (2026-08-31)
+
+
+### Features
+
+* **pi-subagents:** emit the bound announcement once a child binds its extensions ([6beb934](https://github.com/gotgenes/pi-packages/commit/6beb9345ee411eebdaed38a55f368bdcc6779034)), closes [#792](https://github.com/gotgenes/pi-packages/issues/792)
+
+
+### Documentation
+
+* **pi-subagents:** note the unguarded-child warning under excludedExtensionPackages ([013a306](https://github.com/gotgenes/pi-packages/commit/013a30629c0d69be3cd78d1db5d2f5510b221c27)), closes [#792](https://github.com/gotgenes/pi-packages/issues/792)
+
+## [21.0.3](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.0.2...pi-subagents-v21.0.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* **pi-subagents:** include the agent ID in foreground and resumed subagent results ([1794aa6](https://github.com/gotgenes/pi-packages/commit/1794aa6cb6352d5d1789546706297ec5d89d7b2d)), closes [#798](https://github.com/gotgenes/pi-packages/issues/798)
+
+## [21.0.2](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.0.1...pi-subagents-v21.0.2) (2026-08-31)
+
+
+### Bug Fixes
+
+* **pi-subagents:** render the agent widget in sessions with no model tool call ([82bd707](https://github.com/gotgenes/pi-packages/commit/82bd707cbe93d59f1207968349058711dc368e7f)), closes [#827](https://github.com/gotgenes/pi-packages/issues/827)
+
+## [21.0.1](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.0.0...pi-subagents-v21.0.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **pi-subagents:** give a subagent one skills catalogue and one working-directory claim ([610a4e9](https://github.com/gotgenes/pi-packages/commit/610a4e9ace48cc0bb9a91367e468867172403ea0))
+* **pi-subagents:** keep a quoted skills catalogue from misplacing the inherited cut ([49f3e46](https://github.com/gotgenes/pi-packages/commit/49f3e46b3b673f60105679ab5e4a30c65c75ef78)), closes [#801](https://github.com/gotgenes/pi-packages/issues/801)
+
+
+### Documentation
+
+* **pi-subagents:** document how a child's system prompt is assembled ([b3b96bf](https://github.com/gotgenes/pi-packages/commit/b3b96bfc8c22a501ba14f7a8672ccb59ee951c9e))
+
+## [21.0.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v20.1.0...pi-subagents-v21.0.0) (2026-08-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pi-subagents:** `WorkspacePrepareContext` no longer carries `invocation`. A `WorkspaceProvider` that read `ctx.invocation` must drop the read; there is no replacement field. The value was a UI display snapshot - `modelName` was a lowercased display string, and `undefined` whenever it matched the parent's model - so it never carried usable per-call facts. If a provider needs one, open an issue naming the fact: the seam will grow a purpose-built field (`isBackground`, `model`, `maxTurns`), not the display snapshot.
+* **pi-subagents:** an agent .md that sets model, thinking, max_turns, inherit_context, or run_in_background no longer overrides a subagent tool call that names the same field. Add `locked: true` to the agent's frontmatter to restore the previous behavior for every field the file sets, or `locked: [model, thinking]` to hold only some. A field named in the list form is withheld from callers even when the file supplies no value of its own.
+
+### Bug Fixes
+
+* **pi-subagents:** honor subagent tool parameters over agent frontmatter unless the agent locks the field ([832d261](https://github.com/gotgenes/pi-packages/commit/832d261501000b847f193a91c359ddc7c1437ccf)), closes [#829](https://github.com/gotgenes/pi-packages/issues/829)
+* **pi-subagents:** reject an unrecognized thinking level instead of silently disabling thinking ([d1bc031](https://github.com/gotgenes/pi-packages/commit/d1bc03162050d1bc7ca8b9eebe9ab54dca768cfa))
+* **pi-subagents:** report a locked field that discarded a subagent parameter ([c0f9ccf](https://github.com/gotgenes/pi-packages/commit/c0f9ccfddbe63aa9bb543cb226e44769a37732fd)), closes [#829](https://github.com/gotgenes/pi-packages/issues/829)
+* **pi-subagents:** report an unknown agent type on background spawns ([7c2a518](https://github.com/gotgenes/pi-packages/commit/7c2a518afde41e803f03a3406ecf43531acec74e)), closes [#829](https://github.com/gotgenes/pi-packages/issues/829)
+
+
+### Documentation
+
+* **pi-subagents:** clarify what modelFromParams reports under locked fields ([45da58b](https://github.com/gotgenes/pi-packages/commit/45da58b755948ee06255be90ab4d0eaffb4fb3d8)), closes [#829](https://github.com/gotgenes/pi-packages/issues/829)
+* **pi-subagents:** correct which spawn options agent frontmatter fills ([f25d283](https://github.com/gotgenes/pi-packages/commit/f25d28392d3a98b684753b3cd005f10f062b6cc6)), closes [#829](https://github.com/gotgenes/pi-packages/issues/829)
+* **pi-subagents:** document locked-field precedence and the corrected thinking levels ([86e59a6](https://github.com/gotgenes/pi-packages/commit/86e59a6f2b0c358e8f48697efd6aece757367e17))
+
+
+### Code Refactoring
+
+* **pi-subagents:** drop the unread invocation field from the workspace seam ([4942e09](https://github.com/gotgenes/pi-packages/commit/4942e094adfba104e711b8f4bada2d27ffa8e3e3))
+
+## [20.1.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v20.0.1...pi-subagents-v20.1.0) (2026-08-29)
+
+
+### Features
+
+* **pi-subagents:** report turn count, background mode, turn limit, and transcript path in agent snapshots ([ad59849](https://github.com/gotgenes/pi-packages/commit/ad598497949682b36188eec23a9b44010cec8e20)), closes [#830](https://github.com/gotgenes/pi-packages/issues/830)
+
+
+### Bug Fixes
+
+* **pi-subagents:** stop agent snapshots from aliasing live token totals ([d7278f8](https://github.com/gotgenes/pi-packages/commit/d7278f89b8294f7cf6b95ba77d724fde0fa45914)), closes [#830](https://github.com/gotgenes/pi-packages/issues/830)
+
+
+### Documentation
+
+* **pi-subagents:** document the public agent-snapshot contract ([df6132c](https://github.com/gotgenes/pi-packages/commit/df6132c1f9d3166a79472b5228db914bee3ad3b2)), closes [#830](https://github.com/gotgenes/pi-packages/issues/830)
+
+## [20.0.1](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v20.0.0...pi-subagents-v20.0.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **pi-subagents:** enforce disabled-agent rejection for SDK-spawned agents ([7b202e9](https://github.com/gotgenes/pi-packages/commit/7b202e9bc13dd930db3fa268cb37050364b517e0)), closes [#724](https://github.com/gotgenes/pi-packages/issues/724)
+* **pi-subagents:** scope SDK-spawned child sessions to their parent ([0731bad](https://github.com/gotgenes/pi-packages/commit/0731badaf894ce79aecd8a954a9eadfc741ff2ea)), closes [#724](https://github.com/gotgenes/pi-packages/issues/724)
+* **pi-subagents:** show SDK-spawned background agents in the widget ([8e19739](https://github.com/gotgenes/pi-packages/commit/8e197396399c15ad44c75a700a88f8676717613e)), closes [#724](https://github.com/gotgenes/pi-packages/issues/724)
+
+
+### Documentation
+
+* **pi-subagents:** document the SDK spawn contract and the manager's registry edge ([4bbd4b5](https://github.com/gotgenes/pi-packages/commit/4bbd4b583d15c788321198cd31e780ecf7d8dd19)), closes [#724](https://github.com/gotgenes/pi-packages/issues/724)
+
+## [20.0.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v19.3.5...pi-subagents-v20.0.0) (2026-08-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pi-subagents:** @earendil-works/pi-coding-agent must now be >=0.81.0, narrowed from >=0.80.5. Replaying a native provider registration needs ModelRegistry.getRegisteredNativeProvider() and the registerProvider(provider) overload, and 0.81.0 is the first release carrying both; 0.80.8 through 0.80.10 expose neither, and 0.80.5 through 0.80.7 lack the modelRuntime session option and the public ModelRegistry constructor as well. Run `pi update --self` to upgrade, or stay on @gotgenes/pi-subagents 19.3.5.
+
+### Bug Fixes
+
+* **pi-subagents:** inherit runtime-registered providers in child sessions ([f805ffc](https://github.com/gotgenes/pi-packages/commit/f805ffc4a6ae1849c4d396cd7697f09ea38b6ec6))
+
+
+### Documentation
+
+* **pi-subagents:** document provider inheritance in child sessions ([f3afdf4](https://github.com/gotgenes/pi-packages/commit/f3afdf46e1897731aaf7e6e1b2c1dba66031ac13)), closes [#812](https://github.com/gotgenes/pi-packages/issues/812)
+
 ## [19.3.5](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v19.3.4...pi-subagents-v19.3.5) (2026-08-21)
 
 

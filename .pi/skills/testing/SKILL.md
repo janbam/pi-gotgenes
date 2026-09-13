@@ -46,6 +46,7 @@ Load this skill when writing, debugging, or planning tests.
   Use `"key" in overrides` presence checks or `Object.hasOwn(overrides, "key")` for fields where `undefined` is a meaningful test value.
 - When dropping an `as unknown as X` cast from a mock, the type checker starts verifying `mockReturnValue` payloads too, not just method presence.
   Incomplete return-value literals the cast used to mask (e.g. `{ state: "allow" }` for a full `PermissionCheckResult`) fail `pnpm run check`; build them with the shared `make*` fixture builder instead.
+- A disposable spike that constructs a domain object uses the same `test/helpers/` builder the real tests use — locate it with `grep -rn "make<Thing>" test/helpers/` rather than hand-building the literal or guessing the module name (Refs #840).
 
 ### Timers and environment
 
@@ -66,8 +67,20 @@ Load this skill when writing, debugging, or planning tests.
   Use `toEqual` for a full-shape assertion, or assert a discriminating field the negative case cannot produce.
 - When proving a guard test is not vacuous, build the probe to match the guard's exact predicate.
   A near-miss probe (`void runRpcSession;` against a guard matching `runRpcSession(`) leaves the guard silent and looks like proof it is broken (Refs #678).
+- Before asserting, name both outcomes and confirm your assertion's value differs between them **under the fixture's defaults**.
+  A signal can be legitimate and still fail to discriminate: asserting `status === "running"` to prove foreground resolution passes for a background agent too, because the default concurrency limit admits it immediately.
+  Pick a signal only one branch can produce — there, the observer callback that fires for background agents alone (Refs #724).
 - A new test that passes during the Red step is either an invariant pin or a broken probe — decide which before moving to Green.
   The broken case is a probe string that also appears elsewhere in the output: `toContain("x")` matched the unrelated fixture path `secret.txt` and passed pre-fix (Refs #760).
+  Decide by mutation: break the code the pin covers and confirm the pin fails — a pin that survives its own mutation is a broken probe (Refs #807).
+- A mutation is scoped to one claim, so it kills one equivalence class and no more.
+  Ignoring frontmatter entirely killed the three `default`-request pins and correctly left the two `explicit` pins green — "I mutated and saw reds" is not evidence the whole set is sound (Refs #724).
+- When the code under test accepts two shapes of the same input (an ordinal or an issue number, a string or an array), check that the fixtures do not all pick one shape.
+  The live input can exercise the other arm exclusively — both roadmaps spell their batch tail `tail = Step 3` while every fixture used issue identity (Refs #894).
+- A bulk red caused by a signature change masks per-test probe quality.
+  Twenty-one tests failing because a required field does not exist yet says nothing about whether any individual assertion discriminates; that is not the per-test red the rule above asks for.
+- A test authored or rewritten **after** Green never had a Red step, so the rule above never triggers for it.
+  Mutate it explicitly before committing.
 - When a fix replaces an ambient global read (`node:path`'s `sep`, `process.platform`, `Date.now`) with an injected value, pick a red-probe input where the ambient and injected values **differ on the CI host**.
   A `win32PathFlavor` probe on `/tmp/logs/` passes pre-fix on POSIX CI — the host `sep` is `/` too; a native `c:\dir\file.ts` collapses to `./*` and goes red (Refs #655).
 - An equivalence test (incremental vs. freshly built, cached vs. uncached) pins self-consistency, not correctness, when both sides run the code under test.
@@ -83,6 +96,17 @@ Load this skill when writing, debugging, or planning tests.
 ## Test organization
 
 Group tests by the behavior or concern they exercise — open a nested `describe("<concern>", () => { ... })` per concern rather than appending `it` blocks to a flat list.
+Nest by the unit under test and then the scenario; do not repeat a shared prefix across sibling blocks.
+Twenty sibling `describe("SubagentManager — <concern>")` blocks carry the unit's name as a repeated string fragment, where one `describe("SubagentManager")` holding `describe("spawn")` and `describe("spawnAndWait")` carries it in the structure.
+Nesting is for grouping and organization, not only for a shared `beforeEach`.
+
+The tree is a correctness tool, not cosmetics.
+Choosing a parent forces you to name what each test claims, and a test that will not sit cleanly under any parent usually has a fuzzy claim — which is where a broken probe hides.
+Two tests grouped under "foreground commitment" turned out to assert on the resolved type: they had been grouped by the method they called rather than the behavior they pinned, and nesting made the mismatch visible (Refs #724).
+Parallel structure also turns coverage into a grid — once `spawn > type resolution` and `spawnAndWait > type resolution` sit side by side, an asymmetry between them is legible in a way a hole in a flat list never is.
+
+Name a `describe` after the behavior or scenario, never after a historical bug or issue number.
+`describe("SubagentManager — Bug 1 race condition")` references a numbering no later reader can resolve, and the file holding it has no `Bug 2`.
 When adding tests for a new concern (e.g. a `details` field alongside existing content assertions), start a new `describe` block instead of extending the existing one.
 When consolidating duplicated test arrangements, group the shared setup in a describe-scoped `beforeEach` and keep the act (the call under test) explicit in each test.
 Do not wrap the system-under-test call in a helper to eliminate a duplication-metric clone — the repeated act is the test subject, not duplication to remove.
@@ -136,6 +160,8 @@ A missing export throws `is not a function` at runtime but surfaces as `TS2305` 
 - When a TDD step narrows a union type (removes variants), grep all test files for fixtures or mocks that use the removed variant — those test fixes must land in the same step as the type change, not in later steps.
 - When adding a field to a shared interface, grep for ALL test files that construct a compatible mock — not just factory helpers.
 - When estimating the call-site count for a test migration, grep the bare callee (`checkTool(`), not `callee(arg, "literal"` — a single-line pattern misses multi-line invocations where args span continuation lines, undercounting scope (Refs #504).
+  A literal-argument pattern also cannot see a call site relying on a **default parameter** — `function checkPath(…, surface = "path")` carries no literal at all.
+  Grep the helper's signature too (Refs #806).
 - When a TDD step removes a field from a shared interface, grep all `src/` files that reference the removed field — every file that reads or passes the field must update in the same step.
   This is the inverse of the excess-property rule: TypeScript rejects reading a property that no longer exists on the type.
 - When a TDD step removes a field from an event payload or shared interface, grep `test/` for assertion literals naming it too — `toHaveBeenCalledWith({ … })` against an untyped `vi.fn()` or event bus is invisible to `tsc` and fails only at the full-suite run (Refs #745).

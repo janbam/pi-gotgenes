@@ -27,6 +27,28 @@ function makeParams(overrides: Partial<BackgroundParams> = {}): BackgroundParams
 }
 
 describe("spawnBackground", () => {
+  /**
+   * The door declares a commitment rather than a default, because
+   * resolveSpawnConfig already merged the agent's frontmatter and AgentTool
+   * routed here on the result. The distinction is not observable today — the
+   * tool only reaches this door when the merged value was already true, where
+   * both request kinds resolve alike — but it is the contract #829 builds on to
+   * make a caller's explicit override win, so a silent flip to "default" must
+   * fail here rather than in that issue's work.
+   */
+  it("commits explicitly to background rather than deferring to frontmatter", () => {
+    const { manager } = createToolDeps();
+
+    spawnBackground(manager, makeParams());
+
+    expect(manager.spawn).toHaveBeenCalledWith(
+      expect.anything(), // snapshot
+      expect.any(String),
+      "do something",
+      expect.objectContaining({ background: { kind: "explicit", isBackground: true } }),
+    );
+  });
+
   it("passes parentSession.toolCallId to manager.spawn", () => {
     const { manager } = createToolDeps();
     spawnBackground(manager, makeParams({ parentSession: { toolCallId: "tc-99" } }));
@@ -77,6 +99,23 @@ describe("spawnBackground", () => {
     });
     const result = spawnBackground(deps.manager, makeParams());
     expect(result.content[0].text).toContain("/sessions/bg.jsonl");
+  });
+
+  it("leads the result with the spawn's notes", () => {
+    const { manager } = createToolDeps();
+    const result = spawnBackground(
+      manager,
+      makeParams({ config: makeConfig({ fellBack: true, rawType: "unknown-type" }) }),
+    );
+    expect(result.content[0].text).toMatch(
+      /^Note: Unknown agent type "unknown-type" — using general-purpose\.\n\nAgent (started|queued) in background\./,
+    );
+  });
+
+  it("leads the result with the launch message when there are no notes", () => {
+    const { manager } = createToolDeps();
+    const result = spawnBackground(manager, makeParams());
+    expect(result.content[0].text).toMatch(/^Agent (started|queued) in background\./);
   });
 
   it("returns error text when manager.spawn throws", () => {

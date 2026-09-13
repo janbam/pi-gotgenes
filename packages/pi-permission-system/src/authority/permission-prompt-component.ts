@@ -4,25 +4,6 @@ import type {
   KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey } from "@earendil-works/pi-tui";
-import { collapsePastedNewlines } from "#src/authority/bracketed-paste";
-import type {
-  DecisionSource,
-  UserDecisionSurface,
-} from "#src/authority/decision-source";
-import {
-  type PermissionPromptDecision,
-  type RequestPermissionOptions,
-  requestPermissionDecisionFromUi,
-  type UnattributedDecision,
-} from "#src/authority/permission-dialog";
-import {
-  initialPromptState,
-  type PromptEvent,
-  type PromptKey,
-  type PromptModelConfig,
-  type PromptViewState,
-  reducePrompt,
-} from "#src/authority/permission-prompt-decision";
 import {
   completeViewBudget,
   type DialogView,
@@ -31,6 +12,23 @@ import {
 } from "#src/presentation/dialog-renderer";
 import { fitLinesToWidth } from "#src/presentation/line-fitting";
 import type { PromptPayload } from "#src/presentation/prompt-payload";
+import { collapsePastedNewlines } from "./bracketed-paste";
+import type { DecisionSource, UserDecisionSurface } from "./decision-source";
+import {
+  type PermissionPromptDecision,
+  type RequestPermissionOptions,
+  requestPermissionDecisionFromUi,
+  type UnattributedDecision,
+} from "./permission-dialog";
+import {
+  initialPromptState,
+  type PromptEvent,
+  type PromptKey,
+  type PromptModelConfig,
+  type PromptViewState,
+  reducePrompt,
+  visibleOptionKeys,
+} from "./permission-prompt-decision";
 
 /**
  * Inline `ctx.ui.custom` permission dialog for TUI sessions.
@@ -127,11 +125,10 @@ const DEFAULT_SESSION_LABEL = "Yes, for this session";
 const OPTION_LABELS: Record<PromptKey, string> = {
   y: "Yes",
   s: DEFAULT_SESSION_LABEL,
+  b: "Yes, for this session in both directions",
   n: "No",
   r: "No, provide reason",
 };
-
-const OPTION_ORDER: readonly PromptKey[] = ["y", "s", "n", "r"];
 
 export function presentInlinePermissionPrompt(
   view: PermissionPromptView,
@@ -142,6 +139,7 @@ export function presentInlinePermissionPrompt(
   const config: PromptModelConfig = {
     doublePressToConfirm: view.doublePressToConfirm,
     sessionLabel: options?.sessionLabel ?? DEFAULT_SESSION_LABEL,
+    widthLabel: options?.sessionWidth?.label,
     sessionScope: options?.sessionScope,
   };
   return view.ui.custom<UnattributedDecision>(
@@ -330,7 +328,9 @@ class PermissionPromptComponent implements Component {
       return { type: "cancel" };
     }
     if (this.state.step === "decision") {
-      const key = OPTION_ORDER.find((option) => matchesKey(data, option));
+      const key = visibleOptionKeys(this.config).find((option) =>
+        matchesKey(data, option),
+      );
       if (key) {
         return { type: "hotkey", key };
       }
@@ -354,8 +354,8 @@ class PermissionPromptComponent implements Component {
   private renderDecision(width: number): string[] {
     const ask = this.renderAsk(width);
     const lines = [this.theme.fg("accent", this.title), ...ask.lines, ""];
-    for (const key of OPTION_ORDER) {
-      const label = key === "s" ? this.config.sessionLabel : OPTION_LABELS[key];
+    for (const key of visibleOptionKeys(this.config)) {
+      const label = this.labelFor(key);
       const selected = this.state.highlightedKey === key;
       const marker = selected ? "▶" : " ";
       const row = `${marker} (${key}) ${label}`;
@@ -364,6 +364,16 @@ class PermissionPromptComponent implements Component {
     lines.push("");
     lines.push(this.state.hint || this.hint(ask));
     return lines;
+  }
+
+  /**
+   * The row label for a key: the two session options carry ask-supplied text
+   * naming what they grant, and the rest are fixed.
+   */
+  private labelFor(key: PromptKey): string {
+    if (key === "s") return this.config.sessionLabel;
+    if (key === "b") return this.config.widthLabel ?? OPTION_LABELS.b;
+    return OPTION_LABELS[key];
   }
 
   private renderReason(width: number): string[] {

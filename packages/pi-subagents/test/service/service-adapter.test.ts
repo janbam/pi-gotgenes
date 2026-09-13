@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
+import { SubagentState } from "#src/lifecycle/subagent-state";
 import type { WorkspaceProvider } from "#src/lifecycle/workspace";
 import type { SubagentsService } from "#src/service/service";
 import type { ServiceRuntimeLike, SubagentManagerLike } from "#src/service/service-adapter";
 import { SubagentsServiceAdapter, toSubagentRecord } from "#src/service/service-adapter";
-import type { SessionContext, Subagent } from "#src/types";
+import { type SessionContext, Subagent } from "#src/types";
 import { makeModel } from "#test/helpers/make-model";
-import { createTestSubagent } from "#test/helpers/make-subagent";
+import { createTestSubagent, makeStubExecution } from "#test/helpers/make-subagent";
 import { createMockSession, createSubagentSessionStub, toSubagentSession } from "#test/helpers/mock-session";
 import { STUB_SNAPSHOT } from "#test/helpers/stub-ctx";
 
@@ -31,8 +32,10 @@ describe("toSubagentRecord", () => {
       type: "Explore",
       description: "Check stale TODOs",
       status: "completed",
+      isBackground: true,
       result: "Found 3 stale TODOs",
       toolUses: 5,
+      turnCount: 1,
       startedAt: 1000,
       completedAt: 2000,
       lifetimeUsage: { input: 100, output: 200, cacheWrite: 50 },
@@ -40,40 +43,95 @@ describe("toSubagentRecord", () => {
     });
   });
 
-  it("strips the session from the serialized record", () => {
-    const record = createTestSubagent();
+  it("carries a declared question so a consumer can surface it as answerable", () => {
+    const result = toSubagentRecord(createTestSubagent({ pendingQuestion: "Which config?" }));
+    expect(result.pendingQuestion).toBe("Which config?");
+  });
+
+  it("omits pendingQuestion when the agent asked nothing", () => {
+    expect(toSubagentRecord(createTestSubagent())).not.toHaveProperty("pendingQuestion");
+  });
+
+  it("reports the background mode resolved for the agent", () => {
+    const result = toSubagentRecord(createTestSubagent({ isBackground: false }));
+    expect(result.isBackground).toBe(false);
+  });
+
+  it("reports the turns consumed so far", () => {
+    const result = toSubagentRecord(createTestSubagent({ turnCount: 4 }));
+    expect(result.turnCount).toBe(4);
+  });
+
+  it("reports the turn ceiling and the transcript path when the agent has them", () => {
+    const record = createTestSubagent({ maxTurns: 12 });
+    record.subagentSession = toSubagentSession(
+      createSubagentSessionStub(createMockSession(), "/sessions/child.jsonl"),
+    );
+    const result = toSubagentRecord(record);
+    expect(result.maxTurns).toBe(12);
+    expect(result.outputFile).toBe("/sessions/child.jsonl");
+  });
+
+  it("strips live objects and collaborators", () => {
+    const record = createTestSubagent({ toolCallId: "tc-1" });
     record.subagentSession = toSubagentSession(createSubagentSessionStub(createMockSession()));
     const result = toSubagentRecord(record);
     expect(result).not.toHaveProperty("subagentSession");
-  });
-
-  it("strips abortController from the record", () => {
-    const record = createTestSubagent();
-    const result = toSubagentRecord(record);
-    expect(result).not.toHaveProperty("abortController");
-  });
-
-  it("strips promise from the record", () => {
-    const record = createTestSubagent();
-    const result = toSubagentRecord(record);
-    expect(result).not.toHaveProperty("promise");
-  });
-
-  it("strips abortController, promise, and collaborator fields from the record", () => {
-    const record = createTestSubagent();
-    const result = toSubagentRecord(record);
     expect(result).not.toHaveProperty("abortController");
     expect(result).not.toHaveProperty("promise");
     expect(result).not.toHaveProperty("execution");
     expect(result).not.toHaveProperty("notification");
   });
 
-  it("strips invocation and collaborator fields from the serialized output", () => {
-    const record = createTestSubagent({ invocation: { modelName: "haiku" }, toolCallId: "tc-1" });
+  it("withholds momentary activity and package-internal bookkeeping", () => {
+    const record = createTestSubagent({
+      activeTools: ["read", "grep"],
+      responseText: "partial answer",
+      consumedAt: 5000,
+      stoppedWhileQueued: true,
+    });
+    // The source really carries all four, so the assertions below are not vacuous.
+    expect([...record.activeTools.values()]).toEqual(["read", "grep"]);
+    expect(record.responseText).toBe("partial answer");
+    expect(record.consumedAt).toBe(5000);
+    expect(record.stoppedWhileQueued).toBe(true);
+
     const result = toSubagentRecord(record);
-    expect(result).not.toHaveProperty("notification");
-    expect(result).not.toHaveProperty("execution");
-    expect(result).not.toHaveProperty("invocation");
+
+    // Momentary state is reactive by nature and stale the instant it is pulled;
+    // consumedAt and stoppedWhileQueued are internal bookkeeping. See
+    // docs/decisions/0005-subagent-record-admission-policy.md.
+    expect(result).not.toHaveProperty("activeTools");
+    expect(result).not.toHaveProperty("responseText");
+    expect(result).not.toHaveProperty("consumedAt");
+    expect(result).not.toHaveProperty("stoppedWhileQueued");
+  });
+
+  it("does not drift when the agent keeps accumulating usage", () => {
+    const state = new SubagentState({ lifetimeUsage: { input: 100, output: 200, cacheWrite: 50 } });
+    const agent = new Subagent({
+      id: "usage-1",
+      type: "Explore",
+      description: "Check stale TODOs",
+      isBackground: true,
+      execution: makeStubExecution(),
+      state,
+    });
+
+    const snapshot = toSubagentRecord(agent);
+    state.addUsage({ input: 25, output: 0, cacheWrite: 0 });
+
+    expect(snapshot.lifetimeUsage).toEqual({ input: 100, output: 200, cacheWrite: 50 });
+    expect(agent.lifetimeUsage.input).toBe(125);
+  });
+
+  it("does not let a consumer write into the agent's own totals", () => {
+    const agent = createTestSubagent({ lifetimeUsage: { input: 100, output: 200, cacheWrite: 50 } });
+
+    const snapshot = toSubagentRecord(agent);
+    snapshot.lifetimeUsage.input = 999;
+
+    expect(agent.lifetimeUsage.input).toBe(100);
   });
 
   it("omits optional fields when undefined on the source", () => {
@@ -93,7 +151,9 @@ describe("toSubagentRecord", () => {
       type: "general-purpose",
       description: "test",
       status: "running",
+      isBackground: true,
       toolUses: 0,
+      turnCount: 1,
       startedAt: 500,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
@@ -101,6 +161,8 @@ describe("toSubagentRecord", () => {
     expect(result).not.toHaveProperty("result");
     expect(result).not.toHaveProperty("error");
     expect(result).not.toHaveProperty("completedAt");
+    expect(result).not.toHaveProperty("maxTurns");
+    expect(result).not.toHaveProperty("outputFile");
   });
 });
 
@@ -127,6 +189,10 @@ function makeRuntimeStub(override: Partial<ServiceRuntimeLike> = {}): ServiceRun
   return {
     currentCtx: makeStubCtx(),
     buildSnapshot: vi.fn((_: boolean): ParentSnapshot => STUB_SNAPSHOT),
+    getSessionInfo: vi.fn(() => ({
+      parentSessionFile: "/sessions/parent.jsonl",
+      parentSessionId: "parent-session-123",
+    })),
     ...override,
   };
 }
@@ -147,6 +213,10 @@ function createManagerStub() {
     waitForAll: vi.fn<SubagentManagerLike["waitForAll"]>(async () => {}),
     hasRunning: vi.fn<SubagentManagerLike["hasRunning"]>(() => false),
     registerWorkspaceProvider: vi.fn<SubagentManagerLike["registerWorkspaceProvider"]>(() => () => {}),
+    resume: vi.fn<SubagentManagerLike["resume"]>(async () => ({
+      kind: "resumed",
+      record: createTestSubagent(),
+    })),
   };
 }
 
@@ -242,6 +312,44 @@ describe("SubagentsServiceAdapter — spawn", () => {
     );
   });
 
+  describe("thinking level", () => {
+    it("throws for an unrecognized level rather than letting the SDK clamp it to off", () => {
+      const svc = new SubagentsServiceAdapter(createManagerStub(), vi.fn(), makeRuntimeStub());
+
+      expect(() => svc.spawn("Explore", "task", { thinkingLevel: "turbo" })).toThrow(
+        'Invalid thinking level "turbo". Valid levels: off, minimal, low, medium, high, xhigh, max.',
+      );
+    });
+
+    it("passes a recognized level through to the manager", () => {
+      const mgr = createManagerStub();
+      const svc = new SubagentsServiceAdapter(mgr, vi.fn(), makeRuntimeStub());
+
+      svc.spawn("Explore", "task", { thinkingLevel: "xhigh" });
+
+      expect(mgr.spawn).toHaveBeenCalledWith(
+        expect.anything(),
+        "Explore",
+        "task",
+        expect.objectContaining({ thinkingLevel: "xhigh" }),
+      );
+    });
+
+    it("leaves the level unset when the caller omits it", () => {
+      const mgr = createManagerStub();
+      const svc = new SubagentsServiceAdapter(mgr, vi.fn(), makeRuntimeStub());
+
+      svc.spawn("Explore", "task");
+
+      expect(mgr.spawn).toHaveBeenCalledWith(
+        expect.anything(),
+        "Explore",
+        "task",
+        expect.objectContaining({ thinkingLevel: undefined }),
+      );
+    });
+  });
+
   it("delegates to manager.spawn with resolved model", () => {
     const resolvedModel = makeModel({ id: "claude-sonnet", provider: "anthropic" });
     const mgr = createManagerStub();
@@ -259,25 +367,84 @@ describe("SubagentsServiceAdapter — spawn", () => {
       expect.objectContaining({
         model: resolvedModel,
         maxTurns: 5,
-        isBackground: true,
       }),
     );
   });
 
-  it("spawns as foreground when options.foreground is true", () => {
-    const mgr = createManagerStub();
-    const svc = new SubagentsServiceAdapter(
-      mgr,
-      vi.fn(),
-      makeRuntimeStub(),
-    );
-    svc.spawn("Plan", "plan work", { foreground: true });
-    expect(mgr.spawn).toHaveBeenCalledWith(
-      expect.anything(), // snapshot
-      "Plan",
-      "plan work",
-      expect.objectContaining({ isBackground: false }),
-    );
+  /**
+   * An SDK spawn has no tool call, so `toolCallId` is legitimately absent — but
+   * the session identity is not, and permission forwarding routes on
+   * `parentSessionId`. Asserted with toEqual rather than objectContaining so a
+   * stray toolCallId would fail rather than be absorbed.
+   */
+  describe("parent session", () => {
+    it("passes the runtime's session identity, without a toolCallId", () => {
+      const mgr = createManagerStub();
+      const svc = new SubagentsServiceAdapter(mgr, vi.fn(), makeRuntimeStub());
+
+      svc.spawn("Explore", "check TODOs");
+
+      expect(mgr.spawn).toHaveBeenCalledWith(
+        expect.anything(), // snapshot
+        "Explore",
+        "check TODOs",
+        expect.objectContaining({
+          parentSession: {
+            parentSessionFile: "/sessions/parent.jsonl",
+            parentSessionId: "parent-session-123",
+          },
+        }),
+      );
+    });
+  });
+
+  /**
+   * A caller that names `foreground` has committed to a mode; one that omits it
+   * has not, and the agent's own frontmatter decides. The manager reads the
+   * `kind` to tell those apart, so each case must pin the whole request object —
+   * the isBackground value alone cannot distinguish an explicit answer from a
+   * default that happens to agree.
+   */
+  describe("background mode", () => {
+    function spawnAndCaptureBackground(options?: { foreground?: boolean }) {
+      const mgr = createManagerStub();
+      const svc = new SubagentsServiceAdapter(mgr, vi.fn(), makeRuntimeStub());
+      svc.spawn("Plan", "plan work", options);
+      return mgr.spawn;
+    }
+
+    it("defers to the agent config when foreground is omitted", () => {
+      const spawn = spawnAndCaptureBackground();
+
+      expect(spawn).toHaveBeenCalledWith(
+        expect.anything(), // snapshot
+        "Plan",
+        "plan work",
+        expect.objectContaining({ background: { kind: "default", isBackground: true } }),
+      );
+    });
+
+    it("commits to foreground when foreground is true", () => {
+      const spawn = spawnAndCaptureBackground({ foreground: true });
+
+      expect(spawn).toHaveBeenCalledWith(
+        expect.anything(), // snapshot
+        "Plan",
+        "plan work",
+        expect.objectContaining({ background: { kind: "explicit", isBackground: false } }),
+      );
+    });
+
+    it("commits to background when foreground is false", () => {
+      const spawn = spawnAndCaptureBackground({ foreground: false });
+
+      expect(spawn).toHaveBeenCalledWith(
+        expect.anything(), // snapshot
+        "Plan",
+        "plan work",
+        expect.objectContaining({ background: { kind: "explicit", isBackground: true } }),
+      );
+    });
   });
 
   it("uses truncated prompt as default description", () => {
@@ -387,6 +554,72 @@ describe("SubagentsServiceAdapter — steer, abort, waitForAll, hasRunning", () 
       const svc = createSvc(mgr);
       expect(await svc.steer("a-1", "focus on tests")).toBe(true);
       expect(mockSteer).toHaveBeenCalledWith("focus on tests");
+    });
+  });
+});
+
+describe("SubagentsServiceAdapter — resume", () => {
+  function createSvc(mgr: ReturnType<typeof createManagerStub>) {
+    return new SubagentsServiceAdapter(mgr, vi.fn(), makeRuntimeStub());
+  }
+
+  it("delegates to manager.resume with the caller's prompt", async () => {
+    const mgr = createManagerStub();
+    await createSvc(mgr).resume("a-1", "use the staging config");
+
+    expect(mgr.resume).toHaveBeenCalledWith("a-1", "use the staging config", {
+      claimOutcome: undefined,
+      signal: undefined,
+    });
+  });
+
+  it("forwards the caller's delivery claim and signal", async () => {
+    const mgr = createManagerStub();
+    const signal = new AbortController().signal;
+
+    await createSvc(mgr).resume("a-1", "continue", { claimOutcome: true, signal });
+
+    expect(mgr.resume).toHaveBeenCalledWith("a-1", "continue", { claimOutcome: true, signal });
+  });
+
+  it("reports a refusal verbatim, so a consumer can word its own message", async () => {
+    const mgr = createManagerStub();
+    mgr.resume.mockResolvedValue({ kind: "refused", reason: "session-released" });
+
+    expect(await createSvc(mgr).resume("a-1", "continue")).toEqual({
+      kind: "refused",
+      reason: "session-released",
+    });
+  });
+
+  it("returns the resumed agent by value, never the live record", async () => {
+    const mgr = createManagerStub();
+    const record = createTestSubagent({
+      id: "a-1",
+      type: "Explore",
+      description: "task A",
+      result: "Resumed output.",
+      toolUses: 5,
+      lifetimeUsage: { input: 100, output: 200, cacheWrite: 50 },
+    });
+    mgr.resume.mockResolvedValue({ kind: "resumed", record });
+
+    expect(await createSvc(mgr).resume("a-1", "continue")).toEqual({
+      kind: "resumed",
+      record: {
+        id: "a-1",
+        type: "Explore",
+        description: "task A",
+        status: "completed",
+        isBackground: true,
+        result: "Resumed output.",
+        toolUses: 5,
+        turnCount: 1,
+        startedAt: 1000,
+        completedAt: 2000,
+        lifetimeUsage: { input: 100, output: 200, cacheWrite: 50 },
+        compactionCount: 0,
+      },
     });
   });
 });

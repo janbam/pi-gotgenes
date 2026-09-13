@@ -22,6 +22,7 @@ function makeReport(overrides: Partial<AgentReport> = {}): AgentReport {
 		stoppedWhileQueued: false,
 		conversation: undefined,
 		transcriptPath: undefined,
+		resumeRefusal: undefined,
 		...overrides,
 	};
 }
@@ -95,6 +96,92 @@ describe("renderReportBody", () => {
 });
 
 describe("formatAgentReport", () => {
+	it("surfaces a declared question as answerable, naming the resume call", () => {
+		const text = formatAgentReport(
+			makeReport({ id: "agent-7", pendingQuestion: "Which config?" }),
+		);
+
+		expect(text).toContain("This agent is waiting on an answer:");
+		expect(text).toContain("Which config?");
+		expect(text).toContain('resume: "agent-7"');
+	});
+
+	it("adds no affordance when the agent asked nothing", () => {
+		expect(formatAgentReport(makeReport())).not.toContain("waiting on an answer");
+	});
+
+	it("reports a question the released session can no longer answer, without a resume call", () => {
+		const text = formatAgentReport(
+			makeReport({
+				id: "agent-7",
+				pendingQuestion: "Which config?",
+				resumeRefusal: "session-released",
+			}),
+		);
+
+		expect(text).toContain("can no longer be answered");
+		expect(text).toContain("its session was released after its retention window");
+		expect(text).toContain("Which config?");
+		expect(text).not.toContain("resume:");
+	});
+
+	it("reports the updates the agent sent while the parent waited", () => {
+		const text = formatAgentReport(makeReport({ runUpdates: ["The bug is in the retry wrapper."] }));
+
+		expect(text).toContain("Updates this agent sent while it worked:");
+		expect(text).toContain("The bug is in the retry wrapper.");
+	});
+
+	it("adds nothing when the agent sent no updates", () => {
+		expect(formatAgentReport(makeReport())).not.toContain("Updates this agent sent");
+	});
+
+	it("names where a teardown saved the agent's work", () => {
+		const text = formatAgentReport(
+			makeReport({ workspaceNotice: "\n\n---\nChanges saved to branch `pi-agent-7`." }),
+		);
+
+		expect(text).toContain("Changes saved to branch `pi-agent-7`.");
+	});
+
+	it("adds nothing when no teardown reported anything", () => {
+		expect(formatAgentReport(makeReport())).not.toContain("saved to branch");
+	});
+
+	it("reports where the work went before telling the parent how to answer", () => {
+		const text = formatAgentReport(
+			makeReport({
+				pendingQuestion: "Which config?",
+				workspaceNotice: "\n\n---\nChanges saved to branch `pi-agent-7`.",
+			}),
+		);
+
+		// Both must be present, or the index comparison passes on a -1 that means
+		// "absent" rather than "earlier".
+		expect(text).toContain("saved to branch");
+		expect(text).toContain("waiting on an answer");
+		expect(text.indexOf("saved to branch")).toBeLessThan(text.indexOf("waiting on an answer"));
+	});
+
+	it("names the abort, so truncated output is not read as a finished answer", () => {
+		const text = formatAgentReport(
+			makeReport({ status: "aborted", result: "Half of the inv" }),
+		);
+
+		expect(text).toContain("aborted \u2014 max turns exceeded, output may be incomplete");
+		expect(text).toContain("Half of the inv");
+	});
+
+	it("names a turn-limit wrap-up", () => {
+		expect(formatAgentReport(makeReport({ status: "steered" }))).toContain(
+			"wrapped up \u2014 reached turn limit",
+		);
+	});
+
+	it("adds no status note for a plain completion", () => {
+		expect(formatAgentReport(makeReport({ status: "completed" }))).toContain("Status: completed |");
+	});
+
 	it("assembles the full header, stats line, description, and body", () => {
 		const text = formatAgentReport(
 			makeReport({

@@ -30,9 +30,11 @@ import type {
 import type { ModelJudgeConfig } from "./config-schema";
 import {
   type CompleteFn,
+  type ModelCallDeferReason,
   type ModelRegistryLike,
   reviewPath,
 } from "./model-review";
+import type { ForcedToolChoice } from "./tool-choice";
 import {
   type CompiledTypoPatterns,
   compileTypoPatterns,
@@ -60,6 +62,32 @@ interface DecisionBase {
   matchedPattern: string;
   modelId: string;
 }
+
+/**
+ * One `model_judge.decision` record, whole.
+ *
+ * The model-call bookkeeping — latency, and the provider API and forcing value
+ * the call was addressed with — is discriminated on `modelCalled`, so the "null
+ * exactly when no call was made" rule is carried by the type rather than by two
+ * object literals agreeing with each other.
+ *
+ * `api` and `toolChoice` are on the record because a wrong forcing spelling is
+ * otherwise invisible: the call succeeds, the model answers in prose, and the
+ * entry reads `no-tool-call` with nothing to distinguish it from a model that
+ * simply declined the tool (#905).
+ */
+type DecisionRecord = DecisionBase & {
+  verdict: AuthorizerVerdict["kind"];
+  deferReason: ModelCallDeferReason | PreModelDeferReason | null;
+} & (
+    | {
+        modelCalled: true;
+        latencyMs: number;
+        api: string;
+        toolChoice: ForcedToolChoice;
+      }
+    | { modelCalled: false; latencyMs: null; api: null; toolChoice: null }
+  );
 
 /** Collaborators for the reviewer, injected so the extension and tests wire them. */
 export interface TypoReviewerDeps {
@@ -142,14 +170,12 @@ export function createTypoReviewer(
         rawReply: outcome.rawReply,
       });
     }
-    log.review(DECISION_EVENT, {
-      requestId,
-      surface: REVIEWED_SURFACE,
-      path,
-      matchedPattern,
+    writeDecision(log, {
+      ...base,
       modelCalled: true,
-      modelId,
       latencyMs: outcome.latencyMs,
+      api: outcome.api,
+      toolChoice: outcome.toolChoice,
       verdict: outcome.verdict.kind,
       deferReason: outcome.deferReason ?? null,
     });
@@ -167,18 +193,25 @@ function deferWith(
   base: DecisionBase,
   deferReason: PreModelDeferReason,
 ): AuthorizerVerdict {
-  log.review(DECISION_EVENT, {
-    requestId: base.requestId,
-    surface: REVIEWED_SURFACE,
-    path: base.path,
-    matchedPattern: base.matchedPattern,
+  writeDecision(log, {
+    ...base,
     modelCalled: false,
-    modelId: base.modelId,
     latencyMs: null,
+    api: null,
+    toolChoice: null,
     verdict: "defer",
     deferReason,
   });
   return { kind: "defer" };
+}
+
+/**
+ * Write one decision record to the review log. The only writer of
+ * `DECISION_EVENT`, so neither caller can omit a field or spell the surface
+ * differently.
+ */
+function writeDecision(log: AuthorizerLog, record: DecisionRecord): void {
+  log.review(DECISION_EVENT, { surface: REVIEWED_SURFACE, ...record });
 }
 
 /** The gate-authoritative surface, falling back to the display surface. */

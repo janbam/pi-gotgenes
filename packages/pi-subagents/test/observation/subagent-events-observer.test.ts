@@ -7,6 +7,8 @@ import { createTestSubagent } from "#test/helpers/make-subagent";
 function makeNotifications(): NotificationSystem {
 	return {
 		sendCompletion: vi.fn(),
+		sendUpdate: vi.fn(),
+		sendWorkspaceNotice: vi.fn(),
 		dispose: vi.fn(),
 	};
 }
@@ -121,6 +123,34 @@ describe("SubagentEventsObserver", () => {
 			observer.onSubagentCompleted(createTestSubagent({ status: "completed" }));
 			expect(emit).toHaveBeenCalledTimes(1);
 			expect(appendEntry).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe("onSubagentResuming", () => {
+		it("emits subagents:resuming with id, type, description", () => {
+			const { observer, emit } = makeObserver();
+			const record = createTestSubagent({
+				id: "agent-1",
+				type: "general-purpose",
+				description: "do work",
+			});
+
+			observer.onSubagentResuming(record);
+
+			expect(emit).toHaveBeenCalledExactlyOnceWith("subagents:resuming", {
+				id: "agent-1",
+				type: "general-purpose",
+				description: "do work",
+			});
+		});
+
+		it("persists nothing and announces nothing: a run that started is not an outcome", () => {
+			const { observer, appendEntry, notifications } = makeObserver();
+
+			observer.onSubagentResuming(createTestSubagent());
+
+			expect(appendEntry).not.toHaveBeenCalled();
+			expect(notifications.sendCompletion).not.toHaveBeenCalled();
 		});
 	});
 
@@ -265,6 +295,68 @@ describe("SubagentEventsObserver", () => {
 			expect(appendEntry).toHaveBeenCalledTimes(1);
 			// Notifications were called as a side-effect of onSubagentCompleted.
 			expect(notifications.sendCompletion).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe("onSubagentUpdate", () => {
+		it("emits subagents:update carrying the child's message", () => {
+			const { observer, emit } = makeObserver();
+			const record = createTestSubagent({ id: "agent-1", type: "general-purpose", description: "do work" });
+
+			observer.onSubagentUpdate(record, "The bug is in the retry wrapper.");
+
+			expect(emit).toHaveBeenCalledExactlyOnceWith("subagents:update", {
+				id: "agent-1",
+				type: "general-purpose",
+				description: "do work",
+				message: "The bug is in the retry wrapper.",
+			});
+		});
+
+		it("announces the update to the parent", () => {
+			const { observer, notifications } = makeObserver();
+			const record = createTestSubagent({ id: "agent-1" });
+
+			observer.onSubagentUpdate(record, "Course change.");
+
+			expect(notifications.sendUpdate).toHaveBeenCalledExactlyOnceWith(record, "Course change.");
+		});
+
+		it("persists nothing — an update is not an outcome to reconstruct history from", () => {
+			const { observer, appendEntry } = makeObserver();
+
+			observer.onSubagentUpdate(createTestSubagent(), "Course change.");
+
+			expect(appendEntry).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("onSubagentWorkspaceNotice", () => {
+		const NOTICE = "\n\n---\nChanges saved to branch `pi-agent-1`.";
+
+		it("announces where the teardown left the child's work", () => {
+			const { observer, notifications } = makeObserver();
+			const record = createTestSubagent({ id: "agent-1" });
+
+			observer.onSubagentWorkspaceNotice(record, NOTICE);
+
+			expect(notifications.sendWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(record, NOTICE);
+		});
+
+		it("emits no event — no consumer asks for one, and a vacant channel is not added", () => {
+			const { observer, emit } = makeObserver();
+
+			observer.onSubagentWorkspaceNotice(createTestSubagent(), NOTICE);
+
+			expect(emit).not.toHaveBeenCalled();
+		});
+
+		it("persists nothing — the outcome it belongs to was recorded long ago", () => {
+			const { observer, appendEntry } = makeObserver();
+
+			observer.onSubagentWorkspaceNotice(createTestSubagent(), NOTICE);
+
+			expect(appendEntry).not.toHaveBeenCalled();
 		});
 	});
 });

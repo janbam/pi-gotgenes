@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AccessPath } from "#src/access-intent/access-path";
+import type { BashExternalPath } from "#src/access-intent/bash/bash-path-resolver";
+import { isGateDescriptor } from "#src/handlers/gates/descriptor";
 import { ToolCallGatePipeline } from "#src/handlers/gates/tool-call-gate-pipeline";
-import { PathNormalizer } from "#src/path-normalizer";
+import { PathNormalizer } from "#src/path/path-normalizer";
 
 import {
   makeGateInputs,
   makeGateRunner,
   makeResolver,
+  makeSurfaceDenyingResolver,
   makeTcc,
 } from "#test/helpers/gate-fixtures";
 import { makeCheckResult } from "#test/helpers/handler-fixtures";
@@ -37,7 +39,7 @@ function makeMockBashProgram(command = "echo hello") {
     commandText: vi.fn(() => command),
     commands: vi.fn<() => []>(() => []),
     pathRuleCandidates: vi.fn<() => []>(() => []),
-    externalPaths: vi.fn<() => AccessPath[]>(() => []),
+    externalAccesses: vi.fn<() => BashExternalPath[]>(() => []),
   };
 }
 
@@ -154,6 +156,56 @@ describe("ToolCallGatePipeline", () => {
     });
   });
 
+  // ── deny pre-emption (#899) ──────────────────────────────────────────────
+
+  describe("evaluate — a deny pre-empts a gate that would prompt", () => {
+    // The `path` gate (#2) asks and the per-tool gate (#6) denies, which is the
+    // reported ordering: an `ask` suspended the call before the deny was
+    // consulted.
+    function askingPathDenyingTool() {
+      const resolver = makeResolver();
+      resolver.resolve.mockImplementation((intent) =>
+        intent.surface === "read"
+          ? makeCheckResult({ state: "deny", matchedPattern: "secret*" })
+          : makeCheckResult({ state: "ask", matchedPattern: "*" }),
+      );
+      return resolver;
+    }
+
+    it("runs the denying gate first and never reaches the asking one", async () => {
+      const resolver = askingPathDenyingTool();
+      const { runner, deps } = makeGateRunner();
+      const runSpy = vi.spyOn(runner, "run");
+      const pipeline = new ToolCallGatePipeline(resolver, makeGateInputs());
+
+      const result = await pipeline.evaluate(
+        makeTcc({ toolName: "read", input: { path: "secrets.txt" } }),
+        runner,
+      );
+
+      expect(result).toMatchObject({ action: "block" });
+      expect(runSpy).toHaveBeenCalledTimes(1);
+      const firstGate = runSpy.mock.calls[0][0];
+      expect(isGateDescriptor(firstGate) && firstGate.surface).toBe("read");
+      expect(deps.escalate).not.toHaveBeenCalled();
+    });
+
+    it("still prompts when no gate denies", async () => {
+      const resolver = makeResolver(
+        makeCheckResult({ state: "ask", matchedPattern: "*" }),
+      );
+      const { runner, deps } = makeGateRunner();
+      const pipeline = new ToolCallGatePipeline(resolver, makeGateInputs());
+
+      await pipeline.evaluate(
+        makeTcc({ toolName: "read", input: { path: "secrets.txt" } }),
+        runner,
+      );
+
+      expect(deps.escalate).toHaveBeenCalled();
+    });
+  });
+
   // ── bash tool ────────────────────────────────────────────────────────────
 
   describe("evaluate — bash tool", () => {
@@ -239,7 +291,7 @@ describe("ToolCallGatePipeline", () => {
         commandText: vi.fn(() => text),
         commands: vi.fn(() => [{ text }]),
         pathRuleCandidates: vi.fn<() => []>(() => []),
-        externalPaths: vi.fn<() => AccessPath[]>(() => []),
+        externalAccesses: vi.fn<() => BashExternalPath[]>(() => []),
       };
     }
 
@@ -364,28 +416,21 @@ describe("ToolCallGatePipeline", () => {
   // ── customExtractors threading (#352) ────────────────────────────────────
 
   describe("evaluate — customExtractors threading (#352)", () => {
-    // Deny only the cross-cutting `path` surface; allow everything else, so a
-    // block can only come from the path gate seeing the extracted path.
-    function pathDenyingResolver() {
-      const resolver = makeResolver();
-      resolver.resolve.mockImplementation((intent) =>
-        intent.surface === "path"
-          ? makeCheckResult({ state: "deny", matchedPattern: "*" })
-          : makeCheckResult(),
-      );
-      return resolver;
-    }
-
     const extractors = {
-      get: (name: string) =>
+      resolve: (name: string) =>
         name === "ffgrep"
-          ? (input: Record<string, unknown>) =>
-              typeof input.target === "string" ? input.target : undefined
+          ? {
+              extractor: (input: Record<string, unknown>) =>
+                typeof input.target === "string" ? input.target : undefined,
+              origin: "local" as const,
+            }
           : undefined,
     };
 
     it("forwards extractors so a custom-shaped tool is path-gated", async () => {
-      const resolver = pathDenyingResolver();
+      // Deny only the cross-cutting `path` surface, so a block can only come
+      // from the path gate seeing the extracted path.
+      const resolver = makeSurfaceDenyingResolver("path");
       const inputs = makeGateInputs();
       const { runner } = makeGateRunner();
       const pipeline = new ToolCallGatePipeline(
@@ -407,7 +452,7 @@ describe("ToolCallGatePipeline", () => {
     });
 
     it("without extractors the custom-shaped tool is not path-gated", async () => {
-      const resolver = pathDenyingResolver();
+      const resolver = makeSurfaceDenyingResolver("path");
       const inputs = makeGateInputs();
       const { runner } = makeGateRunner();
       const pipeline = new ToolCallGatePipeline(resolver, inputs);

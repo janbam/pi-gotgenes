@@ -180,16 +180,96 @@ Comma entry.`);
     });
   });
 
-  it("passes through thinking level as-is (no validation)", () => {
-    writeAgent("anythink", `---
-thinking: turbo
----
+  describe("locked field", () => {
+    it("is undefined when the key is absent", () => {
+      writeAgent("open", `---\nmodel: haiku\n---\n\nOpen.`);
 
-Any thinking.`);
+      expect(loadCustomAgents(tmpDir).get("open")!.locked).toBeUndefined();
+    });
 
-    const result = loadCustomAgents(tmpDir);
-    // Pi validates at session creation — we just pass through
-    expect(result.get("anythink")!.thinking).toBe("turbo");
+    it("reads `true` as locking every field the file sets", () => {
+      writeAgent("pinned", `---\nmodel: haiku\nlocked: true\n---\n\nPinned.`);
+
+      expect(loadCustomAgents(tmpDir).get("pinned")!.locked).toBe(true);
+    });
+
+    it("reads `false` as no lock at all", () => {
+      writeAgent("unpinned", `---\nmodel: haiku\nlocked: false\n---\n\nUnpinned.`);
+
+      expect(loadCustomAgents(tmpDir).get("unpinned")!.locked).toBeUndefined();
+    });
+
+    it("reads a comma-separated scalar", () => {
+      writeAgent("scalar", `---\nlocked: model, thinking\n---\n\nScalar.`);
+
+      expect(loadCustomAgents(tmpDir).get("scalar")!.locked).toEqual(["model", "thinking"]);
+    });
+
+    it("reads a YAML flow sequence", () => {
+      writeAgent("seq", `---\nlocked: [model, max_turns]\n---\n\nSequence.`);
+
+      expect(loadCustomAgents(tmpDir).get("seq")!.locked).toEqual(["model", "max_turns"]);
+    });
+
+    it("reads every lockable field name", () => {
+      writeAgent("all", `---\nlocked: [model, thinking, max_turns, inherit_context, run_in_background]\n---\n\nAll.`);
+
+      expect(loadCustomAgents(tmpDir).get("all")!.locked).toEqual([
+        "model",
+        "thinking",
+        "max_turns",
+        "inherit_context",
+        "run_in_background",
+      ]);
+    });
+
+    it("drops an entry that is not a lockable field", () => {
+      writeAgent("typo", `---\nlocked: [model, tools]\n---\n\nTypo.`);
+
+      expect(loadCustomAgents(tmpDir).get("typo")!.locked).toEqual(["model"]);
+    });
+
+    it("is undefined when every entry is dropped", () => {
+      writeAgent("alltypo", `---\nlocked: [tools]\n---\n\nAll typo.`);
+
+      expect(loadCustomAgents(tmpDir).get("alltypo")!.locked).toBeUndefined();
+    });
+
+    it("reads `none` as no lock", () => {
+      writeAgent("nolock", `---\nlocked: none\n---\n\nNo lock.`);
+
+      expect(loadCustomAgents(tmpDir).get("nolock")!.locked).toBeUndefined();
+    });
+  });
+
+  describe("thinking level", () => {
+    it.each(["off", "minimal", "low", "medium", "high", "xhigh", "max"])(
+      "keeps %s",
+      (level) => {
+        writeAgent("thinker", `---\nthinking: ${level}\n---\n\nA thinker.`);
+
+        expect(loadCustomAgents(tmpDir).get("thinker")!.thinking).toBe(level);
+      },
+    );
+
+    /**
+     * Pi does not reject an unrecognized level — clampThinkingLevel misses it in
+     * its ordered table and falls to the first supported level, which is always
+     * "off". Passing it through would silently disable thinking for an agent whose
+     * author asked for more of it, so the loader drops the field and the agent
+     * inherits the parent's level instead (Refs #834).
+     */
+    it("drops an unrecognized level rather than letting the SDK clamp it to off", () => {
+      writeAgent("anythink", `---\nthinking: turbo\n---\n\nAny thinking.`);
+
+      expect(loadCustomAgents(tmpDir).get("anythink")!.thinking).toBeUndefined();
+    });
+
+    it("drops a level that differs only in case", () => {
+      writeAgent("shouty", `---\nthinking: HIGH\n---\n\nShouting.`);
+
+      expect(loadCustomAgents(tmpDir).get("shouty")!.thinking).toBeUndefined();
+    });
   });
 
   it("accepts max_turns: 0 as unlimited", () => {

@@ -6,7 +6,11 @@
  * Follows the same pattern as pi-permission-system's ExtensionRuntime.
  */
 
-import { buildParentSnapshot, type ParentSnapshot } from "#src/lifecycle/parent-snapshot";
+import {
+  buildParentSnapshot,
+  type ParentPromptOptions,
+  type ParentSnapshot,
+} from "#src/lifecycle/parent-snapshot";
 import type { ModelInfo } from "#src/tools/spawn-config";
 import type { SessionContext } from "#src/types";
 
@@ -17,6 +21,8 @@ import type { SessionContext } from "#src/types";
 export interface RunConfig {
   readonly defaultMaxTurns: number | undefined;
   readonly graceTurns: number;
+  /** Whether a background child gets the `notify_parent` channel. */
+  readonly midRunUpdates: boolean;
 }
 
 /**
@@ -29,6 +35,12 @@ export class SubagentRuntime {
   // ── Session state (was closure-scoped in index.ts) ───────────────────────
   /** Active Pi session context — set on session_start, cleared on session_shutdown. */
   currentCtx: SessionContext | undefined = undefined;
+
+  /**
+   * Prompt options Pi assembled for the parent's latest turn, captured from
+   * `before_agent_start`. Undefined until the parent has run one.
+   */
+  private lastPromptOptions: ParentPromptOptions | undefined = undefined;
 
   // ── Session-context methods ──────────────────────────────────────────────
 
@@ -43,12 +55,23 @@ export class SubagentRuntime {
   }
 
   /**
+   * Record the prompt options Pi assembled for the parent's latest turn.
+   *
+   * Captured from `before_agent_start`, which is the only event carrying them:
+   * `getSystemPromptOptions()` is attached to a command context, not to the
+   * session context this runtime holds.
+   */
+  setSystemPromptOptions(options: ParentPromptOptions): void {
+    this.lastPromptOptions = options;
+  }
+
+  /**
    * Build a parent snapshot from the current session context.
    * Only valid during an active session (currentCtx is defined).
    */
   buildSnapshot(inheritContext: boolean): ParentSnapshot {
 
-    return buildParentSnapshot(this.currentCtx!, inheritContext);
+    return buildParentSnapshot(this.currentCtx!, inheritContext, this.lastPromptOptions);
   }
 
   /** Extract model info from the current session context. */

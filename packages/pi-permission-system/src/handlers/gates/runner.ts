@@ -1,28 +1,24 @@
 import type { AskEscalator } from "#src/authority/authorizer-selection";
+import { resolutionFor } from "#src/authority/decision-resolution";
+import type { DecisionSource } from "#src/authority/decision-source";
 import type { PermissionPromptDecision } from "#src/authority/permission-dialog";
-import type { DecisionReporter } from "#src/decision-reporter";
-import { applyPermissionGate } from "#src/permission-gate";
+import type { DecisionReporter } from "#src/logging/decision-reporter";
 import { createPermissionRequestId } from "#src/permission-request-id";
-import type { ScopedPermissionResolver } from "#src/permission-resolver";
+import { applyPermissionGate } from "#src/policy/permission-gate";
+import type { ScopedPermissionResolver } from "#src/policy/permission-resolver";
 import {
   renderPolicyDenial,
-  renderUnavailableDenial,
-  renderUserDenial,
+  renderRefusal,
 } from "#src/presentation/agent-renderer";
 import { renderReviewLogFacts } from "#src/presentation/review-log-renderer";
-import type { SessionApprovalRecorder } from "#src/session-approval-recorder";
-import type { PermissionCheckResult } from "#src/types";
+import type { SessionApprovalRecorder } from "#src/session/session-approval-recorder";
 import type {
   DecisionEventFacts,
   GateDescriptor,
   GateResult,
 } from "./descriptor";
-import { isGateBypass } from "./descriptor";
-import {
-  buildDecisionEvent,
-  deriveResolution,
-  resolveYoloGrant,
-} from "./helpers";
+import { isGateBypass, preResolvedCheckOf } from "./descriptor";
+import { buildDecisionEvent, resolveYoloGrant } from "./helpers";
 import type { GateOutcome } from "./types";
 
 // ── GateRunner class ───────────────────────────────────────────────────────
@@ -92,25 +88,16 @@ export class GateRunner {
     agentName: string | null,
     requestId: string,
   ): Promise<GateOutcome> {
-    // 1. Resolve permission state — pre-check, pre-resolved, or via resolver
-    let check: PermissionCheckResult;
-    if (descriptor.preCheck) {
-      check = descriptor.preCheck;
-    } else if (descriptor.preResolved) {
-      check = {
-        state: descriptor.preResolved.state,
-        toolName: descriptor.surface,
-        source: "tool",
-        origin: "builtin",
-      };
-    } else {
-      check = this.resolver.resolve({
+    // 1. Resolve permission state — what the descriptor already carries, or
+    // via the resolver when it carries nothing.
+    const check =
+      preResolvedCheckOf(descriptor) ??
+      this.resolver.resolve({
         kind: "tool",
         surface: descriptor.surface,
         input: descriptor.input,
         agentName: agentName ?? undefined,
       });
-    }
 
     // The fields every review-log write for this gate shares, whatever the
     // resolution — built once so a field added here reaches all of them. The
@@ -160,12 +147,17 @@ export class GateRunner {
     // single auto_approved review entry + decision event so log parity holds.
     const yoloGrant = resolveYoloGrant(check, this.isYoloEnabled());
     if (yoloGrant) {
+      // The pattern that raised the ask, sentinel included: "yolo allowed it"
+      // alone does not say why it was asked in the first place. One record for
+      // both the review entry and the broadcast, so they cannot disagree.
+      const decidedByYolo: DecisionSource = {
+        kind: "yolo",
+        pattern: check.matchedPattern ?? null,
+      };
       this.reporter.writeReviewLog("permission_request.auto_approved", {
         ...logContext,
         resolution: "auto_approved",
-        // The pattern that raised the ask, sentinel included: "yolo allowed
-        // it" alone does not say why it was asked in the first place.
-        decidedBy: { kind: "yolo", pattern: check.matchedPattern ?? null },
+        decidedBy: decidedByYolo,
       });
       this.emitDecision(
         requestId,
@@ -174,7 +166,7 @@ export class GateRunner {
           yoloGrant,
           agentName,
           "allow",
-          deriveResolution(yoloGrant.state, "allow", false, false, true),
+          resolutionFor(decidedByYolo, { approved: true, forSession: false }),
         ),
       );
       return { action: "allow" };
@@ -189,17 +181,25 @@ export class GateRunner {
     const { payload } = descriptor;
     const messages = {
       denyReason: renderPolicyDenial(payload, check.reason ?? null),
-      unavailableReason: (decision: PermissionPromptDecision) =>
-        renderUnavailableDenial(payload, decision.denialReason ?? null),
-      userDeniedReason: (decision: PermissionPromptDecision) =>
-        renderUserDenial(payload, decision.denialReason ?? null),
+      refusedReason: (decision: PermissionPromptDecision) =>
+        renderRefusal(
+          payload,
+          decision.decidedBy,
+          decision.denialReason ?? null,
+        ),
     };
 
-    let autoApproved = false;
-    let confirmationUnavailable = false;
+    // The rule that resolved this gate, and the decider for every arm that
+    // never escalates: `allow` and `deny` are recorded authority answering.
+    const decidedByRule: DecisionSource = {
+      kind: "rule",
+      surface: descriptor.surface,
+      pattern: check.matchedPattern ?? null,
+      origin: check.origin,
+    };
     const gateResult = await applyPermissionGate({
       state: check.state,
-      sessionApproval: descriptor.sessionApproval?.toGateApproval(),
+      canGrantForSession: descriptor.sessionApproval?.isRecordable ?? false,
       promptForApproval: async () => {
         const decision = await this.prompter.escalate({
           requestId,
@@ -209,25 +209,18 @@ export class GateRunner {
             ? { sessionApproval: descriptor.sessionApproval.toForwardedData() }
             : {}),
         });
-        autoApproved = decision.autoApproved === true;
-        confirmationUnavailable = decision.confirmationUnavailable === true;
         return decision;
       },
       writeLog: (event, details) =>
         this.reporter.writeReviewLog(event, details),
       logContext,
-      decidedByRule: {
-        kind: "rule",
-        surface: descriptor.surface,
-        pattern: check.matchedPattern ?? null,
-        origin: check.origin,
-      },
+      decidedByRule,
       messages,
     });
 
-    // 4. Determine whether session approval was granted
-    const hasSessionApproval =
-      gateResult.action === "allow" && gateResult.sessionApproval !== undefined;
+    // 4. Determine whether session approval was granted, and at what width
+    const sessionGrant =
+      gateResult.action === "allow" ? gateResult.sessionGrant : undefined;
 
     // 5. Emit decision event
     this.emitDecision(
@@ -237,20 +230,19 @@ export class GateRunner {
         check,
         agentName,
         gateResult.action === "allow" ? "allow" : "deny",
-        deriveResolution(
-          check.state,
-          gateResult.action,
-          hasSessionApproval,
-          confirmationUnavailable,
-          autoApproved,
-        ),
+        resolutionFor(gateResult.decidedBy, {
+          approved: gateResult.action === "allow",
+          forSession: sessionGrant !== undefined,
+        }),
       ),
     );
 
     // 6. Record session approval — tell the store; it owns the per-pattern loop
-    // hasSessionApproval already implies gateResult.action === "allow"
-    if (hasSessionApproval && descriptor.sessionApproval) {
-      this.recorder.recordSessionApproval(descriptor.sessionApproval);
+    // A present grant already implies gateResult.action === "allow".
+    if (sessionGrant && descriptor.sessionApproval) {
+      this.recorder.recordSessionApproval(
+        descriptor.sessionApproval.atWidth(sessionGrant.width),
+      );
     }
 
     if (gateResult.action === "block") {

@@ -42,6 +42,8 @@ An agent type not in `worktreeAgents` runs in the parent working directory, exac
 ## Behavior
 
 - A child whose agent type is listed gets a fresh detached worktree at `HEAD` before it runs.
+- When the child ends its turn with a question for you, the worktree is kept so the child can be resumed into it; cleanup happens when the resumed child finishes instead.
+  A question you never answer keeps the worktree until the subagents core releases the child's session.
 - When the child finishes with no changes, the worktree is removed.
 - When the child finishes with changes, they are committed to a branch (`pi-agent-<id>`), and the child's result gains a note: `Changes saved to branch \`<branch>\`. Merge with: \`git merge <branch>\``.
 - If a commit hook rejects that commit, it is retried once with `--no-verify`, because the commit exists to rescue work the child already did and a rejecting hook would otherwise cost you that work.
@@ -51,6 +53,17 @@ An agent type not in `worktreeAgents` runs in the parent working directory, exac
   Nothing is deleted while its state is uncertain, so the work stays recoverable.
 - If worktree creation fails for an opted-in agent (not a git repo, no commits yet, or `git worktree add` fails), the child run **fails** with an explanatory error rather than silently running unisolated.
 - At the start of every session with a UI, any rescue worktrees still on disk are named in a warning, so a preserved worktree is not forgotten once the child's result scrolls out of view.
+- At that same point, any `pi-agent-` branch whose work is not yet on `HEAD` is named in a second warning.
+  A worktree torn down after the child's result already reached you — a question you never answered, or a session that ended — still commits the child's work to a branch, but there is no result left to print the note into.
+  The warning is how that branch is found again.
+
+## Recovering rescue branches
+
+A rescue branch is an ordinary git branch holding one commit of whatever the child had changed.
+Inspect it with `git log <branch>` or `git diff HEAD..<branch>`, and merge it with `git merge <branch>` when you want the work.
+
+The warning lists a branch only while its work is not on `HEAD`, so merging one is all it takes to stop hearing about it.
+A branch you have decided against is deleted with `git branch -D <branch>` — this package never deletes one for you, because an unmerged branch is exactly the content that is not safe to discard on the extension's judgment.
 
 ## Recovering preserved worktrees
 

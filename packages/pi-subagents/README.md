@@ -21,7 +21,10 @@ Run them in foreground or background, steer them mid-run, resume completed sessi
 - **Session transcripts** — open any subagent's full session transcript (running or with its session released) in pi's native read-only viewer via `/subagents:sessions`
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
-- **Session resume** — pick up where an agent left off, preserving full conversation context
+- **Session resume** — pick up where an agent left off, preserving full conversation context.
+  An agent given an isolated workspace by a `WorkspaceProvider` is resumable while that workspace is live — which, for an agent that ended its turn with a question, lasts until you answer it
+- **Ask-back** — an agent that needs information only you have calls `ask_parent` and ends its turn, and every result surfaces the question with the exact `resume` call that answers it; once that agent can no longer be resumed, the result says so and why instead of naming a call that would be refused
+- **Mid-run updates** — an agent that finds something material calls `notify_parent` and keeps working; the message arrives on its own while you are idle and that agent is still running, and otherwise rides that agent's own result, so you hear it exactly once and never as a stale prompt to steer an agent that has finished
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work.
   Unknown types fall back to general-purpose with a note
@@ -29,7 +32,7 @@ Run them in foreground or background, steer them mid-run, resume completed sessi
 - **Context inheritance** — optionally fork the parent conversation into a sub-agent so it knows what's been discussed
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML.
   Expandable to show full output
-- **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `resumed`, `steered`, `compacted`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
+- **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `resuming`, `resumed`, `steered`, `compacted`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
 
 ## Install
 
@@ -117,11 +120,14 @@ Launch a sub-agent.
 | `description`       | string       | yes      | Short 3-5 word summary (shown in UI)                             |
 | `subagent_type`     | string       | yes      | Agent type (built-in or custom)                                  |
 | `model`             | string       | no       | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
-| `thinking`          | string       | no       | Thinking level: off, minimal, low, medium, high, xhigh           |
-| `max_turns`         | number       | no       | Max agentic turns. Omit for unlimited (default)                  |
+| `thinking`          | string       | no       | Thinking level: off, minimal, low, medium, high, xhigh, max      |
+| `max_turns`         | number       | no       | Max agentic turns. Omit for the agent's own limit                |
 | `run_in_background` | boolean      | no       | Run without blocking                                             |
 | `resume`            | string       | no       | Agent ID to resume a previous session                            |
 | `inherit_context`   | boolean      | no       | Fork parent conversation into agent                              |
+
+These five parameters win over the agent file's own values, which fill whichever the call leaves unset.
+An agent file can withhold one with [`locked`](./docs/configuration.md#locking-fields-against-callers); the result then names the agent and the parameters it ignored.
 
 ### `get_subagent_result`
 
@@ -132,6 +138,10 @@ Check status and retrieve results from a background agent.
 | `agent_id` | string  | yes      | Agent ID to check             |
 | `wait`     | boolean | no       | Wait for completion           |
 | `verbose`  | boolean | no       | Include full conversation log |
+
+The result renders as a compact three-line summary — status, stats, description, and a one-line preview.
+Press `Ctrl+O` to expand it to the full report, bounded so a long result cannot fill the terminal; the expanded view names the transcript path when it withholds anything.
+The complete report, including the conversation `verbose` requests, always reaches the model regardless of what the terminal shows.
 
 ### `steer_subagent`
 
@@ -219,6 +229,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:started`          | Agent transitions to running (including queued→running) | `id`, `type`, `description`                                                                                          |
 | `subagents:completed`        | Agent finished successfully                             | `id`, `type`, `durationMs`, `tokens` (lifetime `{ input, output, total }`), `toolUses`, `result`                     |
 | `subagents:failed`           | Agent errored, stopped, or aborted                      | same as completed + `error`, `status`                                                                                |
+| `subagents:resuming`         | Resume started, from either front door                  | `id`, `type`, `description`                                                                                          |
 | `subagents:resumed`          | Resumed run reached a terminal state (completed/error)  | same as completed + `error`, `status` (`buildEventData` shape) — `status`/`error` discriminate                       |
 | `subagents:steered`          | Steering message sent                                   | `id`, `message`                                                                                                      |
 | `subagents:compacted`        | Agent's session successfully compacted                  | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
@@ -265,6 +276,7 @@ When [`@gotgenes/pi-permission-system`](https://github.com/gotgenes/pi-permissio
 - **`ask`-state forwarding** — when a child session triggers an `ask` permission, the prompt forwards to the parent session's UI.
   The parent approves or denies, and the child resumes.
 - **Deterministic child detection** — this extension publishes `subagents:child:session-created` before `bindExtensions()` fires; the permission system subscribes and registers the child session synchronously, so detection does not rely on env vars or filesystem heuristics.
+- **Unguarded children are announced** — this extension also publishes `subagents:child:bound` once a child's extensions have bound; the permission system uses it to notice a child that loaded no permission node of its own — the case [`excludedExtensionPackages`](docs/configuration.md#excluding-package-extensions-from-children) can create — and warns rather than letting it run ungated in silence.
 
 No configuration is required.
 When `@gotgenes/pi-permission-system` is not installed, the lifecycle events have no subscriber — a harmless no-op.
@@ -285,6 +297,69 @@ svc?.spawn("Explore", "Check for stale TODOs");
 
 Declare this package as an optional peer dependency.
 See `src/service/service.ts` for the full `SubagentsService` interface and the `WorkspaceProvider` seam.
+
+#### `spawn` contract
+
+`spawn` returns the new agent's id immediately — it never waits for the run.
+Use `getRecord(id)` to poll, `steer` to send a message, and the `subagents:completed` event to learn when it finished.
+
+The agent type is canonicalized, so `"explore"` and `"Explore"` reach the same agent.
+An unrecognized type falls back to `general-purpose` rather than throwing, matching the `subagent` tool's behavior.
+
+It throws in four cases:
+
+- there is no active session, so there is no parent to spawn from;
+- a `model` string does not resolve against the session's model registry;
+- a `thinkingLevel` is not one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`;
+- the named agent type exists but is disabled (`enabled: false`).
+
+Agent frontmatter never overrides an option you pass.
+It fills `model`, `thinkingLevel`, and `maxTurns` when you omit them; `inheritContext` is the exception, and defaults to `false` whatever the agent file declares.
+An agent file's [`locked`](./docs/configuration.md#locking-fields-against-callers) frontmatter does not apply here — it guards against a model guessing harness settings, and an SDK caller is not that.
+
+Background mode follows the caller's degree of commitment.
+Omit `foreground` and the agent's own `run_in_background` frontmatter decides, defaulting to background when the agent declares nothing.
+Pass `foreground` explicitly and it wins outright, whatever the frontmatter says.
+
+A spawned agent is a first-class citizen of the runtime: it appears in the background widget, carries its parent's session identity so permission prompts route correctly, and nests its session file under the parent's.
+
+#### `getRecord` / `listAgents` contract
+
+Both return `SubagentRecord`, a by-value snapshot: nothing in it changes after you receive it, and writing to it cannot reach the agent.
+Poll again for fresh data.
+
+The snapshot carries identity (`id`, `type`, `description`), lifecycle status (`status`, `startedAt`, `completedAt`, `result`, `error`), the resolved spawn facts (`isBackground`, `maxTurns`), cumulative metrics (`toolUses`, `turnCount`, `compactionCount`, `lifetimeUsage`), and `outputFile` — the path to the agent's session JSONL, which you can read with Pi's own `parseSessionEntries`.
+
+It deliberately withholds momentary activity (the tools running right now, the partial response text) and this package's internal bookkeeping.
+A pulled snapshot of momentary state would be stale on arrival; [decision 0005](docs/decisions/0005-subagent-record-admission-policy.md) records the full policy and what would reopen it.
+
+`SubagentRecord` and `SubagentsService` are types this package produces and you read — not contracts to implement.
+A new field is therefore a minor release; use a cast or a `Partial<>` for a test double rather than implementing either type.
+
+#### `resume` contract
+
+`resume(id, prompt, options?)` continues a settled agent's session, and is the one service call that waits: it resolves when the resumed run reaches a terminal state, carrying the terminal snapshot.
+A caller that does not need the outcome can ignore the promise.
+
+It never throws and never rejects.
+A resume that could not start resolves to `{ kind: "refused", reason }` instead, promptly — the checks are synchronous and no turn loop runs:
+
+| `reason`             | Meaning                                                         |
+| -------------------- | --------------------------------------------------------------- |
+| `unknown-agent`      | No record answers to that id (records are cleared per session)  |
+| `still-running`      | The agent has not settled; wait, or `steer` it while it runs    |
+| `no-session`         | The agent never had a session to continue                       |
+| `session-released`   | Its session was released after the retention window             |
+| `workspace-disposed` | Its isolated workspace is gone, so a resume cannot re-enter it  |
+
+A resumed run that _fails_ is still `{ kind: "resumed" }`; the snapshot carries `status: "error"` and the message.
+Refused means nothing started.
+
+By default the resumed outcome is announced to the parent like any other background completion.
+Pass `claimOutcome: true` to declare that your extension is delivering it, which suppresses that announcement — do this only if you will actually carry the result to the parent, or it reaches nobody.
+
+Pass `signal` to cancel the resumed turn loop.
+`abort(id)` does not reach it: a resume does not run under the record's own abort controller.
 
 ### `@gotgenes/pi-subagents/settings` — layered config loader
 
@@ -316,6 +391,27 @@ const config = loadLayeredSettings<MyConfig>({
 `loadLayeredSettings` returns `Partial<T>` (all fields optional); apply your defaults after the call.
 It never throws — all error conditions produce a `console.warn` and return `{}`.
 
+### Extensions that append to the system prompt
+
+If your extension appends to the system prompt from a `before_agent_start` handler, your parent-session block does **not** ride into child sessions.
+A child inherits only the stable part of the parent's prompt — everything Pi assembled ahead of the skills catalogue — so anything appended after that is dropped.
+See [What a child inherits from the parent's prompt](./docs/configuration.md#what-a-child-inherits-from-the-parents-prompt) for the full layer breakdown.
+
+This is usually invisible to you, because your handler runs in the child too: a child binds the parent's extension set, and its turn loop fires `before_agent_start` the same way the parent's does.
+An unconditional appender therefore writes a fresh block built for the child's own session — which is what you want, since the parent's copy named the parent's directory, model, and session.
+
+Two cases need care:
+
+- A handler gated on something a child lacks — an interactive UI, a terminal, or state your extension cached at `session_start` — appends nothing in the child.
+  That child now carries no block at all, where previously it inherited one built for the parent.
+  If your guidance applies to children, make the handler unconditional or derive its inputs from the event context rather than from cached session state.
+- An extension excluded from children through [`excludedExtensionPackages`](./docs/configuration.md#excluding-package-extensions-from-children) contributes nothing to a child by design, and no longer leaks its parent-session block in either.
+
+Extensions that _shape_ the prompt at the provider boundary rather than appending to it are unaffected — the region they rewrite is the identity a child inherits verbatim.
+
+An extension that states something **per session** — which tools this session may call, which skills it loaded — should append it rather than edit the inherited identity, even when Pi wrote its own copy up there.
+Editing that region rewrites bytes the child inherited from its parent, which ends the prefix the two share; `@gotgenes/pi-permission-system` relocates the `Available tools:` and `Guidelines:` sections to the end of the prompt for exactly this reason ([#890](https://github.com/gotgenes/pi-packages/issues/890)).
+
 ## Scope and non-goals
 
 **Purpose.**
@@ -333,8 +429,9 @@ Anything attaching to the core either subscribes to a lifecycle event, or regist
   Scheduling, cross-extension RPC, model-scope enforcement, and a built-in tool denylist belong to upstream — see [Relationship to upstream](#relationship-to-upstream).
 - _Policy about what a child may do._
   Tool restriction is allow/ask/deny in a permission layer, not a binary hide in a spawner — see [Migrating from `disallowed_tools`](#migrating-from-disallowed_tools).
-- _Widening a child's tool allowlist on the agent's behalf._
-  An agent's `tools:` frontmatter is the complete allowlist and the only mechanism that widens it, because a settings-level list would hand a read-only `Explore` agent write-capable tools from a file its author never saw.
+- _Widening a child's tool allowlist with **capability** tools on the agent's behalf._
+  An agent's `tools:` frontmatter is the only thing that admits a capability tool, and no settings key may name one, because a settings-level list would hand a read-only `Explore` agent write-capable tools from a file its author never saw.
+  The core does install its own protocol in every child — the `<active_agent>` tag, the parent-context prefix, and the `ask_parent` / `notify_parent` tools — none of which reaches the filesystem, the shell, or the network.
 - _A global run-mode default._
   Foreground or background is a per-invocation argument and a per-agent frontmatter key; a global flip changes every existing agent file at once.
 - _Provider seams with no consumer._

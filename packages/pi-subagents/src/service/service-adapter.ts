@@ -6,21 +6,30 @@
  */
 
 import type { Model } from "@earendil-works/pi-ai";
+import { parseThinkingLevel, thinkingLevelError } from "#src/config/thinking-level";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
+import type { AgentSpawnConfig, ResumeCallOptions, ResumeOutcome } from "#src/lifecycle/subagent-manager";
 import type { WorkspaceProvider } from "#src/lifecycle/workspace";
-import type { SpawnOptions, SubagentRecord, SubagentsService } from "#src/service/service";
+import type {
+  ResumeOptions,
+  ResumeResult,
+  SpawnOptions,
+  SubagentRecord,
+  SubagentsService,
+} from "#src/service/service";
 import type { ModelRegistry } from "#src/session/model-resolver";
-import type { SessionContext, Subagent } from "#src/types";
+import type { SessionContext, Subagent, ThinkingLevel } from "#src/types";
 
 /** Narrow interface for the SubagentManager — avoids coupling to the concrete class. */
 export interface SubagentManagerLike {
-  spawn(snapshot: ParentSnapshot, type: string, prompt: string, options: unknown): string;
+  spawn(snapshot: ParentSnapshot, type: string, prompt: string, options: AgentSpawnConfig): string;
   getRecord(id: string): Subagent | undefined;
   listAgents(): Subagent[];
   abort(id: string): boolean;
   waitForAll(): Promise<void>;
   hasRunning(): boolean;
   registerWorkspaceProvider(provider: WorkspaceProvider): () => void;
+  resume(id: string, prompt: string, options: ResumeCallOptions): Promise<ResumeOutcome>;
 }
 
 /**
@@ -30,6 +39,8 @@ export interface SubagentManagerLike {
 export interface ServiceRuntimeLike {
   readonly currentCtx: SessionContext | undefined;
   buildSnapshot(inheritContext: boolean): ParentSnapshot;
+  /** Parent session identity, so an SDK-spawned child nests under its parent. */
+  getSessionInfo(): { parentSessionFile: string; parentSessionId: string };
 }
 
 /** Adapter that wraps SubagentManager to satisfy SubagentsService. */
@@ -47,17 +58,26 @@ export class SubagentsServiceAdapter implements SubagentsService {
 
     const model = this.resolveModelOption(options?.model);
     const description = options?.description ?? prompt.slice(0, 80);
-    const isBackground = !(options?.foreground ?? false);
 
     const snapshot = this.runtime.buildSnapshot(options?.inheritContext ?? false);
+    const { parentSessionFile, parentSessionId } = this.runtime.getSessionInfo();
     return this.manager.spawn(snapshot, type, prompt, {
       description,
       model,
+      // No toolCallId — an SDK spawn has no originating tool call, and
+      // Subagent.toolCallId reporting undefined there is the truth.
+      parentSession: { parentSessionFile, parentSessionId },
       maxTurns: options?.maxTurns,
-      thinkingLevel: options?.thinkingLevel,
+      thinkingLevel: this.resolveThinkingLevel(options?.thinkingLevel),
       inheritContext: options?.inheritContext,
       bypassQueue: options?.bypassQueue,
-      isBackground,
+      // A caller that names `foreground` has committed; one that omits it has
+      // not, so the agent's own frontmatter decides and background is the
+      // SDK-door default.
+      background:
+        options?.foreground === undefined
+          ? { kind: "default", isBackground: true }
+          : { kind: "explicit", isBackground: !options.foreground },
     });
   }
 
@@ -83,6 +103,18 @@ export class SubagentsServiceAdapter implements SubagentsService {
     return outcome.kind !== "rejected";
   }
 
+  async resume(id: string, prompt: string, options?: ResumeOptions): Promise<ResumeResult> {
+    const outcome = await this.manager.resume(id, prompt, {
+      claimOutcome: options?.claimOutcome,
+      signal: options?.signal,
+    });
+    // A refusal is the same value on both sides; only the resumed arm crosses
+    // the by-value boundary the snapshot draws.
+    return outcome.kind === "refused"
+      ? outcome
+      : { kind: "resumed", record: toSubagentRecord(outcome.record) };
+  }
+
   async waitForAll(): Promise<void> {
     return this.manager.waitForAll();
   }
@@ -93,6 +125,20 @@ export class SubagentsServiceAdapter implements SubagentsService {
 
   registerWorkspaceProvider(provider: WorkspaceProvider): () => void {
     return this.manager.registerWorkspaceProvider(provider);
+  }
+
+  /**
+   * Narrow an optional thinking-level override, rejecting one the SDK does not know.
+   *
+   * `SpawnOptions` widens the field to `string` for the public surface, and Pi clamps an
+   * unrecognized level down to `off` rather than reporting it — so a typo would silently
+   * disable thinking in the child. Throwing matches the adapter's other input failures.
+   */
+  private resolveThinkingLevel(input: string | undefined): ThinkingLevel | undefined {
+    if (input == null) return undefined;
+    const level = parseThinkingLevel(input);
+    if (level === undefined) throw new Error(thinkingLevelError(input));
+    return level;
   }
 
   /** Resolve an optional model-string override against the current session's registry. */
@@ -112,7 +158,12 @@ export class SubagentsServiceAdapter implements SubagentsService {
 
 /**
  * Convert an internal Subagent to a serializable SubagentRecord.
- * Uses an explicit allowlist — new fields must be opted in.
+ *
+ * The allowlist is explicit because the snapshot admits only discrete facts —
+ * identity, resolved spawn decisions, cumulative metrics, and pointers to
+ * durable artifacts. Live objects, momentary activity, and package-internal
+ * bookkeeping stay out; see
+ * `docs/decisions/0005-subagent-record-admission-policy.md`.
  */
 export function toSubagentRecord(record: Subagent): SubagentRecord {
   const out: SubagentRecord = {
@@ -120,15 +171,23 @@ export function toSubagentRecord(record: Subagent): SubagentRecord {
     type: record.type,
     description: record.description,
     status: record.status,
+    isBackground: record.isBackground,
     toolUses: record.toolUses,
+    turnCount: record.turnCount,
     startedAt: record.startedAt,
-    lifetimeUsage: record.lifetimeUsage,
+    // Copy: the agent accumulates into its own object on every message_end, so
+    // an aliased snapshot would drift, and a consumer could write into the
+    // agent's totals.
+    lifetimeUsage: { ...record.lifetimeUsage },
     compactionCount: record.compactionCount,
   };
 
   if (record.result !== undefined) out.result = record.result;
+  if (record.pendingQuestion !== undefined) out.pendingQuestion = record.pendingQuestion;
   if (record.error !== undefined) out.error = record.error;
   if (record.completedAt !== undefined) out.completedAt = record.completedAt;
+  if (record.maxTurns !== undefined) out.maxTurns = record.maxTurns;
+  if (record.outputFile !== undefined) out.outputFile = record.outputFile;
 
   return out;
 }

@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-
+import { surfaceFamilyOf } from "#src/access-intent/path-surfaces";
 import { EXTENSION_TAG } from "#src/presentation/agent-renderer";
 import { buildExternalDirectoryAskPayload } from "#src/presentation/path-ask-payload";
 import type { PermissionCheckResult } from "#src/types";
@@ -51,6 +51,7 @@ describe("external_directory helper regression guard", () => {
         pathValue: "/outside/file",
         cwd: "/project",
         agentName: null,
+        surface: "external_directory_read",
       }).request.value,
     ).toBe("/outside/file");
   });
@@ -109,32 +110,34 @@ describe("external_directory path scope", () => {
     expect(result).toBeDefined();
   });
 
-  it.each(
-    ALL_PATH_BEARING_TOOLS,
-  )("blocks %s with an out-of-cwd path when external_directory is deny", async (toolName) => {
-    const { handler } = makeHandler({
-      session: { checkPermission: makeExtDirCheck("deny") },
-      tools: ALL_TOOLS,
-    });
-    const event = makeToolCallEvent(toolName, {
-      input: { path: EXTERNAL_PATH },
-    });
-    const result = await handler.handleToolCall(event, makeCtx());
-    expect(result).toMatchObject({ action: "block" });
-  });
+  it.each(ALL_PATH_BEARING_TOOLS)(
+    "blocks %s with an out-of-cwd path when external_directory is deny",
+    async (toolName) => {
+      const { handler } = makeHandler({
+        session: { checkPermission: makeExtDirCheck("deny") },
+        tools: ALL_TOOLS,
+      });
+      const event = makeToolCallEvent(toolName, {
+        input: { path: EXTERNAL_PATH },
+      });
+      const result = await handler.handleToolCall(event, makeCtx());
+      expect(result).toMatchObject({ action: "block" });
+    },
+  );
 
-  it.each(
-    OPTIONAL_PATH_TOOLS,
-  )("skips external_directory check for %s when path is omitted", async (toolName) => {
-    const { handler } = makeHandler({
-      session: { checkPermission: makeExtDirCheck("deny") },
-      tools: ALL_TOOLS,
-    });
-    // No path in input — external_directory gate should not fire
-    const event = makeToolCallEvent(toolName);
-    const result = await handler.handleToolCall(event, makeCtx());
-    expect(result).toEqual({ action: "allow" });
-  });
+  it.each(OPTIONAL_PATH_TOOLS)(
+    "skips external_directory check for %s when path is omitted",
+    async (toolName) => {
+      const { handler } = makeHandler({
+        session: { checkPermission: makeExtDirCheck("deny") },
+        tools: ALL_TOOLS,
+      });
+      // No path in input — external_directory gate should not fire
+      const event = makeToolCallEvent(toolName);
+      const result = await handler.handleToolCall(event, makeCtx());
+      expect(result).toEqual({ action: "allow" });
+    },
+  );
 });
 
 // ── Policy state matrix: allow and deny ────────────────────────────────────
@@ -158,7 +161,7 @@ describe("external_directory policy state — allow", () => {
     const event = makeToolCallEvent("read", { input: { path: EXTERNAL_PATH } });
     await handler.handleToolCall(event, makeCtx());
     expect(findExtDirDecision(events)).toMatchObject({
-      surface: "external_directory",
+      surface: "external_directory_read",
       result: "allow",
       resolution: "policy_allow",
     });
@@ -214,7 +217,7 @@ describe("external_directory — allow external reads, gate external writes (#14
     expect(result).toMatchObject({ action: "block" });
   });
 
-  it("emits separate decision events for external_directory and write surfaces", async () => {
+  it("emits only the denying surface's decision event", async () => {
     const { handler, events } = makeHandler({
       session: { checkPermission: makeExtDirCheck("allow", "deny") },
       tools: ALL_TOOLS,
@@ -225,16 +228,15 @@ describe("external_directory — allow external reads, gate external writes (#14
     await handler.handleToolCall(event, makeCtx());
     const decisions = getDecisionEvents(events);
     const writeDecision = decisions.find((d) => d.surface === "write");
-    expect(findExtDirDecision(events)).toMatchObject({
-      surface: "external_directory",
-      result: "allow",
-      resolution: "policy_allow",
-    });
     expect(writeDecision).toMatchObject({
       surface: "write",
       result: "deny",
       resolution: "policy_deny",
     });
+    // The `write` deny pre-empts every other gate, so the boundary gate that
+    // would have allowed this path never runs and states no decision about a
+    // call that did not happen (#899).
+    expect(findExtDirDecision(events)).toBeUndefined();
   });
 });
 
@@ -285,7 +287,7 @@ describe("external_directory policy state — deny", () => {
     const event = makeToolCallEvent("read", { input: { path: EXTERNAL_PATH } });
     await handler.handleToolCall(event, makeCtx());
     expect(findExtDirDecision(events)).toMatchObject({
-      surface: "external_directory",
+      surface: "external_directory_read",
       result: "deny",
       resolution: "policy_deny",
     });
@@ -315,7 +317,7 @@ describe("external_directory policy state — ask", () => {
     const event = makeToolCallEvent("read", { input: { path: EXTERNAL_PATH } });
     await handler.handleToolCall(event, makeCtx());
     expect(findExtDirDecision(events)).toMatchObject({
-      surface: "external_directory",
+      surface: "external_directory_read",
       result: "allow",
       resolution: "user_approved",
     });
@@ -341,7 +343,7 @@ describe("external_directory policy state — ask", () => {
     const event = makeToolCallEvent("read", { input: { path: EXTERNAL_PATH } });
     await handler.handleToolCall(event, makeCtx());
     expect(findExtDirDecision(events)).toMatchObject({
-      surface: "external_directory",
+      surface: "external_directory_read",
       result: "deny",
       resolution: "user_denied",
     });
@@ -374,7 +376,7 @@ describe("external_directory policy state — ask", () => {
     // The gate surface names the boundary; an unavailable verdict states only
     // that approval was unreachable, since no retry shape changes that.
     expect((result as { reason?: string }).reason).toBe(
-      `${EXTENSION_TAG} This 'external_directory' call for tool 'read' for path '${EXTERNAL_PATH}' requires approval, but no interactive UI is available.`,
+      `${EXTENSION_TAG} This 'external_directory_read' call for tool 'read' for path '${EXTERNAL_PATH}' requires approval, but no interactive UI is available.`,
     );
   });
 
@@ -387,7 +389,7 @@ describe("external_directory policy state — ask", () => {
     const event = makeToolCallEvent("read", { input: { path: EXTERNAL_PATH } });
     await handler.handleToolCall(event, makeCtx({ hasUI: false }));
     expect(findExtDirDecision(events)).toMatchObject({
-      surface: "external_directory",
+      surface: "external_directory_read",
       result: "deny",
       resolution: "confirmation_unavailable",
     });
@@ -407,7 +409,7 @@ describe("external_directory per-agent override", () => {
           _input: unknown,
           agentName?: string,
         ): PermissionCheckResult => {
-          if (surface === "external_directory") {
+          if (surfaceFamilyOf(surface) === "external_directory") {
             const state =
               agentName === "special-agent" ? "allow" : ("deny" as const);
             return {

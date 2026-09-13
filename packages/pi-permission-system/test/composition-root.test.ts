@@ -6,14 +6,11 @@
  * completeness, shared-instance contracts across factory invocations, teardown,
  * service↔gate registry sharing, and `ready`-after-publish ordering.
  *
- * Every test runs the factory, which mutates four process-global `Symbol.for()`
- * slots and reads `PI_CODING_AGENT_DIR`. The shared `beforeEach`/`afterEach`
- * isolate the agent dir to a tmpdir and clear every global slot so factory runs
- * do not leak across tests.
+ * Every test runs the factory, which mutates three process-global
+ * `Symbol.for()` slots and reads `PI_CODING_AGENT_DIR`. The shared
+ * `beforeEach`/`afterEach` isolate the agent dir to a tmpdir and clear every
+ * global slot so factory runs do not leak across tests.
  */
-/* eslint-disable @typescript-eslint/no-deprecated -- a root session still
-   publishes to the legacy slot, and these cases pin that behavior for the
-   deprecation window; the session-keyed cases use the supported accessor. */
 import {
   existsSync,
   mkdirSync,
@@ -32,29 +29,33 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { childNodeAbsentMessage } from "#src/authority/child-node-audit";
 import {
   createPermissionForwardingLocation,
   type ForwardedPermissionRequest,
+  SUBAGENT_ENV_HINT_KEYS,
 } from "#src/authority/permission-forwarding";
 import { getServingSessionRegistry } from "#src/authority/serving-registry";
-import { SUBAGENT_CHILD_SESSION_CREATED } from "#src/authority/subagent-lifecycle-events";
+import {
+  SUBAGENT_CHILD_BOUND,
+  SUBAGENT_CHILD_SESSION_CREATED,
+} from "#src/authority/subagent-lifecycle-events";
 import { getSubagentSessionRegistry } from "#src/authority/subagent-registry";
 import {
   getGlobalConfigPath,
   getGlobalLogsDir,
   REVIEW_LOG_FILENAME,
-} from "#src/config-paths";
-import { DEFAULT_EXTENSION_CONFIG } from "#src/extension-config";
+} from "#src/config/config-paths";
+import { DEFAULT_EXTENSION_CONFIG } from "#src/config/extension-config";
 import piPermissionSystemExtension from "#src/index";
+import { getPermissionsService } from "#src/service";
 import {
   PERMISSIONS_READY_CHANNEL,
   type PermissionsReadyEvent,
-} from "#src/permission-events";
-import { getPermissionsService, getRootPermissionsService } from "#src/service";
+} from "#src/service/permission-events";
 import { publishServingHeartbeat } from "#test/helpers/forwarding-fixtures";
 import { makeFakePi } from "#test/helpers/make-fake-pi";
 
-const SERVICE_KEY = Symbol.for("@gotgenes/pi-permission-system:service");
 const SUBAGENT_REGISTRY_KEY = Symbol.for(
   "@gotgenes/pi-permission-system:subagent-registry",
 );
@@ -78,6 +79,11 @@ const EXPECTED_HANDLERS = [
 let agentDir: string;
 
 beforeEach(() => {
+  // The factory's detection and forwarding paths read ambient `process.env`, so
+  // a host session exporting a subagent marker must not change the answers.
+  for (const key of SUBAGENT_ENV_HINT_KEYS) {
+    vi.stubEnv(key, undefined);
+  }
   agentDir = mkdtempSync(join(tmpdir(), "pi-perm-comp-root-"));
   vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 });
@@ -85,8 +91,6 @@ beforeEach(() => {
 afterEach(() => {
   // Drop every process-global slot so factory runs do not leak across tests.
   const store = globalThis as Record<symbol, unknown>;
-  // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- Symbol-keyed global property
-  delete store[SERVICE_KEY];
   // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- Symbol-keyed global property
   delete store[SUBAGENT_REGISTRY_KEY];
   // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- Symbol-keyed global property
@@ -130,11 +134,15 @@ type CtxSelect = (
   options: string[],
 ) => Promise<string | undefined>;
 
+/** A `ui.notify` implementation for a test ctx. */
+type CtxNotify = (message: string, kind?: string) => void;
+
 /**
  * Build a test `ctx` with the scaffolding every composition-root ctx shares —
  * `cwd`, a trusted project, a minimal `sessionManager`, and a `ui` whose
- * `notify`/`setStatus`/`input` are inert. Callers vary only `hasUI` and the
- * `select` behavior that drives (or declines) a prompt.
+ * `setStatus`/`input` are inert. Callers vary `hasUI`, the `select` behavior
+ * that drives (or declines) a prompt, and the `notify` sink that receives the
+ * extension's warnings.
  */
 function makeBaseCtx(
   cwd: string,
@@ -142,6 +150,7 @@ function makeBaseCtx(
   options: {
     hasUI?: boolean;
     select?: CtxSelect;
+    notify?: CtxNotify;
     isProjectTrusted?: boolean;
   } = {},
 ): unknown {
@@ -156,7 +165,7 @@ function makeBaseCtx(
       getSessionDir: (): string => cwd,
     },
     ui: {
-      notify: (): void => {},
+      notify: options.notify ?? ((): void => {}),
       setStatus: (): void => {},
       select:
         options.select ?? (async (): Promise<string | undefined> => undefined),
@@ -390,6 +399,168 @@ describe("subagent registry sharing across factory instances", () => {
   });
 });
 
+describe("unguarded in-process child detection", () => {
+  // A child that loads no instance of this extension gates nothing, and the
+  // parent's own gating is unaffected — so without this alarm the operator
+  // watches the permission system work and never learns the child is
+  // unguarded (#792). The parent reads the same process-global service map the
+  // child's node would have published into, which is why this needs the real
+  // factory on two buses rather than a stubbed lookup.
+  let parentCwd: string;
+
+  beforeEach(() => {
+    parentCwd = mkdtempSync(join(tmpdir(), "pi-perm-parent-cwd-"));
+  });
+
+  afterEach(() => {
+    rmSync(parentCwd, { recursive: true, force: true });
+  });
+
+  it("records and warns when a bound child published no service", async () => {
+    const notified: string[] = [];
+    const parentBus = createEventBus();
+    const parentPi = makeFakePi({ events: parentBus });
+    piPermissionSystemExtension(parentPi as unknown as ExtensionAPI);
+    await fireSessionStart(
+      parentPi,
+      makeBaseCtx(parentCwd, "parent-session-unguarded", {
+        notify: (message: string) => notified.push(message),
+      }),
+    );
+
+    // No child factory runs, so nothing publishes under the child's key.
+    parentBus.emit(SUBAGENT_CHILD_SESSION_CREATED, {
+      sessionId: "child-unguarded-1",
+      parentSessionId: "parent-session-unguarded",
+    });
+    parentBus.emit(SUBAGENT_CHILD_BOUND, {
+      sessionId: "child-unguarded-1",
+      parentSessionId: "parent-session-unguarded",
+    });
+
+    expect(getPermissionsService("child-unguarded-1")).toBeUndefined();
+    expect(
+      readReviewLog().filter((entry) => entry.event === "child_node_absent"),
+    ).toHaveLength(1);
+    expect(notified).toEqual([childNodeAbsentMessage("child-unguarded-1")]);
+  });
+
+  it("records every affected child but warns only once", async () => {
+    const notified: string[] = [];
+    const parentBus = createEventBus();
+    const parentPi = makeFakePi({ events: parentBus });
+    piPermissionSystemExtension(parentPi as unknown as ExtensionAPI);
+    await fireSessionStart(
+      parentPi,
+      makeBaseCtx(parentCwd, "parent-session-unguarded", {
+        notify: (message: string) => notified.push(message),
+      }),
+    );
+
+    for (const sessionId of ["child-a", "child-b", "child-c"]) {
+      parentBus.emit(SUBAGENT_CHILD_BOUND, {
+        sessionId,
+        parentSessionId: "parent-session-unguarded",
+      });
+    }
+
+    expect(
+      readReviewLog()
+        .filter((entry) => entry.event === "child_node_absent")
+        .map((entry) => (entry as { childSessionId?: string }).childSessionId),
+    ).toEqual(["child-a", "child-b", "child-c"]);
+    expect(notified).toEqual([childNodeAbsentMessage("child-a")]);
+  });
+
+  it("stays silent for a child whose own node published a service", async () => {
+    const notified: string[] = [];
+    const parentBus = createEventBus();
+    const parentPi = makeFakePi({ events: parentBus });
+    piPermissionSystemExtension(parentPi as unknown as ExtensionAPI);
+    await fireSessionStart(
+      parentPi,
+      makeBaseCtx(parentCwd, "parent-session-guarded", {
+        notify: (message: string) => notified.push(message),
+      }),
+    );
+
+    // A real child node on its own bus, publishing under its own session id —
+    // the healthy case the alarm must not fire for.
+    const childCwd = mkdtempSync(join(tmpdir(), "pi-perm-child-cwd-"));
+    const childPi = makeFakePi({ events: createEventBus() });
+    piPermissionSystemExtension(childPi as unknown as ExtensionAPI);
+    await fireSessionStart(childPi, makeChildCtx(childCwd, "child-guarded-1"));
+
+    parentBus.emit(SUBAGENT_CHILD_BOUND, {
+      sessionId: "child-guarded-1",
+      parentSessionId: "parent-session-guarded",
+    });
+
+    expect(getPermissionsService("child-guarded-1")).toBeDefined();
+    expect(
+      readReviewLog().filter((entry) => entry.event === "child_node_absent"),
+    ).toHaveLength(0);
+    expect(notified).toEqual([]);
+
+    rmSync(childCwd, { recursive: true, force: true });
+  });
+});
+
+describe("interactive serving eligibility", () => {
+  // A spawner may export the parent-session marker from its own root process so
+  // the children it later launches inherit it — `nicobailon/pi-subagents` sets
+  // it to the root's own session id at `session_start`. A node with a UI has a
+  // human who can answer, so it serves its inbox whatever the marker names
+  // (#907).
+  async function startRootThenSetMarker(
+    markerValue: string,
+  ): Promise<{ cwd: string; pi: ReturnType<typeof makeFakePi> }> {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-perm-root-serving-cwd-"));
+    const pi = makeFakePi();
+    const ctx = makeBaseCtx(cwd, "ui-root-session");
+    piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+    await fireSessionStart(pi, ctx);
+    expect(getServingSessionRegistry().servingIds()).toEqual([
+      "ui-root-session",
+    ]);
+
+    vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", markerValue);
+    await pi.fire(
+      "before_agent_start",
+      { systemPrompt: "", systemPromptOptions: { cwd: "/test" } },
+      ctx,
+    );
+
+    return { cwd, pi };
+  }
+
+  it("keeps serving when the root inherits its own session id as the marker", async () => {
+    const { cwd, pi } = await startRootThenSetMarker("ui-root-session");
+
+    expect(getServingSessionRegistry().servingIds()).toEqual([
+      "ui-root-session",
+    ]);
+
+    await pi.fire("session_shutdown");
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("keeps serving when the marker names a different session", async () => {
+    // Not merely the self-naming case: the marker is stale after any mid-session
+    // id change, since the spawner refreshes it only at `session_start`. A UI
+    // host serves regardless of what the marker names.
+    const { cwd, pi } = await startRootThenSetMarker("some-other-session");
+
+    expect(getServingSessionRegistry().servingIds()).toEqual([
+      "ui-root-session",
+    ]);
+
+    await pi.fire("session_shutdown");
+    rmSync(cwd, { recursive: true, force: true });
+  });
+});
+
 describe("out-of-process forwarding liveness", () => {
   // A child spawned as its own `pi` process resolves its parent from the
   // environment and shares no `globalThis` with it, so the serving registry the
@@ -491,6 +662,54 @@ describe("out-of-process forwarding liveness", () => {
     rmSync(childCwd, { recursive: true, force: true });
     rmSync(externalDir, { recursive: true, force: true });
   });
+
+  // A subprocess child kept visible for observability — a Pi Herdsman managed
+  // agent in its own Herdr pane — has a UI of its own and still names the lead
+  // session as its forwarding target (#909).
+  it("forwards from a child that has its own UI while the named parent serves", async () => {
+    writeGlobalConfig(externalAsk);
+    const childCwd = mkdtempSync(join(tmpdir(), "pi-perm-child-cwd-"));
+    const externalDir = mkdtempSync(join(tmpdir(), "pi-perm-external-"));
+    const forwardingDir = join(agentDir, "sessions", "permission-forwarding");
+    const parentSessionId = "parent-session-ui-child";
+    vi.stubEnv("PI_SUBAGENT_PARENT_SESSION", parentSessionId);
+    publishServingHeartbeat(forwardingDir, parentSessionId);
+
+    const capturedTitles: string[] = [];
+    const childPi = makeFakePi({
+      events: createEventBus(),
+      toolNames: ["read"],
+    });
+    piPermissionSystemExtension(childPi as unknown as ExtensionAPI);
+    const firePromise = childPi.fire(
+      "tool_call",
+      {
+        toolName: "read",
+        toolCallId: "ui-child-external-read",
+        input: { path: join(externalDir, "secret.txt") },
+      },
+      makeBaseCtx(childCwd, "child-session-ui", {
+        select: async (title: string): Promise<string | undefined> => {
+          capturedTitles.push(title);
+          return "Yes";
+        },
+      }),
+    );
+
+    const request = await approveForwardedRequest(
+      forwardingDir,
+      parentSessionId,
+    );
+    expect(request.requesterSessionId).toBe("child-session-ui");
+
+    const result = (await firePromise) as { block?: true };
+    expect(result.block).toBeUndefined();
+    // The pane's own dialog never opened: the parent answered.
+    expect(capturedTitles).toEqual([]);
+
+    rmSync(childCwd, { recursive: true, force: true });
+    rmSync(externalDir, { recursive: true, force: true });
+  });
 });
 
 describe("shutdown teardown chain", () => {
@@ -501,12 +720,12 @@ describe("shutdown teardown chain", () => {
 
     // The service is published at session_start, not at factory init.
     await fireSessionStart(pi, makeChildCtx(cwd, "top-session"));
-    expect(getRootPermissionsService()).toBeDefined();
+    expect(getPermissionsService("top-session")).toBeDefined();
 
     await pi.fire("session_shutdown");
 
-    // Service slot cleared.
-    expect(getRootPermissionsService()).toBeUndefined();
+    // Keyed entry cleared.
+    expect(getPermissionsService("top-session")).toBeUndefined();
 
     // Lifecycle unsubscribed: a post-shutdown session-created must not register.
     pi.events.emit(SUBAGENT_CHILD_SESSION_CREATED, {
@@ -538,7 +757,7 @@ describe("service and gate share one formatter registry", () => {
     await fireSessionStart(pi, ctx);
 
     const previewMarker = "PREVIEW::shared-registry-proof";
-    getRootPermissionsService()!.registerToolInputFormatter(
+    getPermissionsService("ui-session")!.registerToolInputFormatter(
       "demo",
       () => previewMarker,
     );
@@ -575,7 +794,7 @@ describe("service and gate share one access extractor registry", () => {
 
     // ffgrep carries its path under a non-standard key; without the extractor
     // the default input.path convention would miss it.
-    getRootPermissionsService()!.registerToolAccessExtractor(
+    getPermissionsService("ui-session")!.registerToolAccessExtractor(
       "ffgrep",
       (input) => (typeof input.target === "string" ? input.target : undefined),
     );
@@ -647,6 +866,202 @@ describe("service and gate share one access extractor registry", () => {
   });
 });
 
+// The split-provider condition (#793, ADR 0012 decision 6) ─────────────────
+
+describe("split-provider extractor inheritance", () => {
+  // Package A registers tool `ffgrep`, whose path lives under a non-standard
+  // key; package B registers the extractor for it. Excluding B alone from
+  // child sessions leaves the child holding the tool with its path
+  // undeclared, and the parent's own gating stays correct — so the weakening
+  // is visible nowhere. A fact-shaping lookup crosses the node boundary to
+  // close it.
+  const parentSessionId = "parent-session-split";
+  const childSessionId = "child-session-split";
+  let parentCwd: string;
+  let childCwd: string;
+  let childPi: ReturnType<typeof makeFakePi>;
+  let childCtx: unknown;
+
+  beforeEach(async () => {
+    writeGlobalConfig({
+      permission: { "*": "allow", path: { "*.env": "deny" } },
+    });
+
+    parentCwd = mkdtempSync(join(tmpdir(), "pi-perm-split-parent-"));
+    childCwd = mkdtempSync(join(tmpdir(), "pi-perm-split-child-"));
+
+    const parentPi = makeFakePi({
+      toolNames: ["ffgrep"],
+      events: createEventBus(),
+    });
+    piPermissionSystemExtension(parentPi as unknown as ExtensionAPI);
+    childPi = makeFakePi({ toolNames: ["ffgrep"], events: createEventBus() });
+    piPermissionSystemExtension(childPi as unknown as ExtensionAPI);
+
+    await fireSessionStart(parentPi, makeBaseCtx(parentCwd, parentSessionId));
+    getSubagentSessionRegistry().register(childSessionId, { parentSessionId });
+    childCtx = makeChildCtx(childCwd, childSessionId);
+    await fireSessionStart(childPi, childCtx);
+  });
+
+  afterEach(() => {
+    rmSync(parentCwd, { recursive: true, force: true });
+    rmSync(childCwd, { recursive: true, force: true });
+  });
+
+  /** ffgrep's path lives under `target`, so it is invisible without one. */
+  function registerFfgrepExtractorOn(sessionId: string): void {
+    getPermissionsService(sessionId)!.registerToolAccessExtractor(
+      "ffgrep",
+      (input) => (typeof input.target === "string" ? input.target : undefined),
+    );
+  }
+
+  /** The entries the child's own path gate wrote about `.env`. */
+  function pathDenials(): Record<string, unknown>[] {
+    return (readReviewLog() as Record<string, unknown>[]).filter(
+      (entry) => entry.path === ".env",
+    );
+  }
+
+  it("gates a child's tool call through an extractor registered only in the parent", async () => {
+    registerFfgrepExtractorOn(parentSessionId);
+
+    const result = (await childPi.fire(
+      "tool_call",
+      {
+        toolName: "ffgrep",
+        toolCallId: "ff-inherited",
+        input: { target: ".env" },
+      },
+      childCtx,
+    )) as { block?: true };
+
+    // Without inheritance the child falls back to the input.path convention,
+    // misses ffgrep's path entirely, and the deny never fires.
+    expect(result.block).toBe(true);
+  });
+
+  it("records that the child's decision used an inherited extractor", async () => {
+    registerFfgrepExtractorOn(parentSessionId);
+
+    await childPi.fire(
+      "tool_call",
+      {
+        toolName: "ffgrep",
+        toolCallId: "ff-provenance",
+        input: { target: ".env" },
+      },
+      childCtx,
+    );
+
+    expect(pathDenials()).not.toHaveLength(0);
+    for (const entry of pathDenials()) {
+      expect(entry.extractorSource).toBe("inherited");
+    }
+  });
+
+  it("leaves the provenance field absent when the child resolved it locally", async () => {
+    registerFfgrepExtractorOn(childSessionId);
+
+    const result = (await childPi.fire(
+      "tool_call",
+      {
+        toolName: "ffgrep",
+        toolCallId: "ff-local",
+        input: { target: ".env" },
+      },
+      childCtx,
+    )) as { block?: true };
+
+    expect(result.block).toBe(true);
+    expect(pathDenials()).not.toHaveLength(0);
+    for (const entry of pathDenials()) {
+      expect(entry).not.toHaveProperty("extractorSource");
+    }
+  });
+});
+
+// The boundary the fact-shaping clause must not cross ───────────────────────
+
+describe("fact-shaping inheritance stops at live authority", () => {
+  // A link returns a verdict, so live authority converges at the adjudicating
+  // node (ADR 0007 §7) and inheriting one would run authority the operator's
+  // own exclusion removed. That a configured-but-absent link is skipped here
+  // rather than borrowed is deliberate; whether the skip should be louder is
+  // its own question, tracked as #861.
+  it("does not resolve an authorizer registered only in the parent", async () => {
+    writeGlobalConfig({
+      permission: { "*": "ask" },
+      authorizerChain: ["parent-only-judge"],
+    });
+
+    const parentCwd = mkdtempSync(join(tmpdir(), "pi-perm-link-parent-"));
+    const childCwd = mkdtempSync(join(tmpdir(), "pi-perm-link-child-"));
+    const parentSessionId = "parent-session-link";
+    const childSessionId = "child-session-link";
+
+    const parentPi = makeFakePi({
+      toolNames: ["demo"],
+      events: createEventBus(),
+    });
+    piPermissionSystemExtension(parentPi as unknown as ExtensionAPI);
+    const childPi = makeFakePi({
+      toolNames: ["demo"],
+      events: createEventBus(),
+    });
+    piPermissionSystemExtension(childPi as unknown as ExtensionAPI);
+
+    // The parent is headless so it serves no inbox: a serving parent would make
+    // the child relay its ask instead of deciding it (#909), and the question
+    // here is what a *locally adjudicating* child does with a link it does not
+    // have. It still publishes its service and its registry entry, which is all
+    // the ancestor walk under test needs.
+    await fireSessionStart(
+      parentPi,
+      makeBaseCtx(parentCwd, parentSessionId, { hasUI: false }),
+    );
+    getSubagentSessionRegistry().register(childSessionId, { parentSessionId });
+
+    // The child has UI and no serving parent, so it adjudicates locally and its
+    // own chain runs — the one shape in which a missing link changes the verdict.
+    const capturedTitles: string[] = [];
+    const childCtx = makeBaseCtx(childCwd, childSessionId, {
+      select: async (title: string): Promise<string | undefined> => {
+        capturedTitles.push(title);
+        return "Yes";
+      },
+    });
+    await fireSessionStart(childPi, childCtx);
+
+    const authorize = vi
+      .fn()
+      .mockResolvedValue({ kind: "deny", reason: "parent judge" });
+    getPermissionsService(parentSessionId)!.registerAuthorizer(
+      "parent-only-judge",
+      authorize,
+    );
+
+    const result = (await childPi.fire(
+      "tool_call",
+      { toolName: "demo", toolCallId: "link-1", input: {} },
+      childCtx,
+    )) as { block?: true };
+
+    // The parent's link never runs in the child: the ask reaches the child's
+    // own approving terminal, and the chain records the vacancy.
+    expect(authorize).not.toHaveBeenCalled();
+    expect(result.block).toBeUndefined();
+    expect(capturedTitles).toHaveLength(1);
+    expect(readReviewLog().map((entry) => entry.event)).toContain(
+      "authorizer_chain_unregistered_link",
+    );
+
+    rmSync(parentCwd, { recursive: true, force: true });
+    rmSync(childCwd, { recursive: true, force: true });
+  });
+});
+
 describe("service and chain share one authorizer registry", () => {
   // A link registered through the published service must be consulted by the
   // live ask gate when the operator names it in authorizerChain — proving both
@@ -668,7 +1083,7 @@ describe("service and chain share one authorizer registry", () => {
 
     // Registered after session_start via the published service; link resolution
     // is per-ask (ADR 0007 §4), so it is honored on the first ask.
-    getRootPermissionsService()!.registerAuthorizer("typo-judge", () =>
+    getPermissionsService("ui-session")!.registerAuthorizer("typo-judge", () =>
       Promise.resolve({ kind: "deny", reason: "typo path" }),
     );
 
@@ -698,7 +1113,7 @@ describe("service and chain share one authorizer registry", () => {
     const { ctx } = makeUiCtx(cwd, capturedTitles);
     await fireSessionStart(pi, ctx);
 
-    getRootPermissionsService()!.registerAuthorizer("typo-judge", () =>
+    getPermissionsService("ui-session")!.registerAuthorizer("typo-judge", () =>
       Promise.resolve({ kind: "deny", reason: "typo path" }),
     );
 
@@ -723,11 +1138,9 @@ describe("ready emitted after service publication", () => {
   // service is published and ready fires at session_start (not factory init).
   it("publishes the service before emitting permissions:ready", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pi-perm-ready-cwd-"));
-    const seen: string[] = [];
     const seenKeyed: string[] = [];
     const pi = makeFakePi();
     pi.events.on(PERMISSIONS_READY_CHANNEL, (data) => {
-      seen.push(getRootPermissionsService() ? "present" : "missing");
       // The payload's own sessionId must already resolve: it is the key a
       // consumer registers through the moment this handler runs.
       const { sessionId } = data as PermissionsReadyEvent;
@@ -741,11 +1154,10 @@ describe("ready emitted after service publication", () => {
     piPermissionSystemExtension(pi as unknown as ExtensionAPI);
 
     // ready is not emitted at load; only after session_start publishes.
-    expect(seen).toEqual([]);
+    expect(seenKeyed).toEqual([]);
 
     await fireSessionStart(pi, makeChildCtx(cwd, "top-session"));
 
-    expect(seen).toEqual(["present"]);
     expect(seenKeyed).toEqual(["present"]);
 
     rmSync(cwd, { recursive: true, force: true });
@@ -774,8 +1186,16 @@ describe("ready emitted after service publication", () => {
     const ctx = makeBaseCtx(cwd, "latch-session");
     await fireSessionStart(pi, ctx);
 
-    await pi.fire("before_agent_start", { systemPrompt: "" }, ctx);
-    await pi.fire("before_agent_start", { systemPrompt: "" }, ctx);
+    await pi.fire(
+      "before_agent_start",
+      { systemPrompt: "", systemPromptOptions: { cwd: "/test" } },
+      ctx,
+    );
+    await pi.fire(
+      "before_agent_start",
+      { systemPrompt: "", systemPromptOptions: { cwd: "/test" } },
+      ctx,
+    );
 
     // One emission at session_start, one at the *first* before_agent_start —
     // the second turn adds none.
@@ -800,14 +1220,26 @@ describe("ready emitted after service publication", () => {
     piPermissionSystemExtension(pi as unknown as ExtensionAPI);
     const ctx = makeBaseCtx(cwd, "latch-reload-session");
     await fireSessionStart(pi, ctx);
-    await pi.fire("before_agent_start", { systemPrompt: "" }, ctx);
+    await pi.fire(
+      "before_agent_start",
+      { systemPrompt: "", systemPromptOptions: { cwd: "/test" } },
+      ctx,
+    );
     expect(emissions).toBe(2);
 
     // A reload runs session_start again: the new generation announces at
     // session_start and once more at its first turn.
     await fireSessionStart(pi, ctx);
-    await pi.fire("before_agent_start", { systemPrompt: "" }, ctx);
-    await pi.fire("before_agent_start", { systemPrompt: "" }, ctx);
+    await pi.fire(
+      "before_agent_start",
+      { systemPrompt: "", systemPromptOptions: { cwd: "/test" } },
+      ctx,
+    );
+    await pi.fire(
+      "before_agent_start",
+      { systemPrompt: "", systemPromptOptions: { cwd: "/test" } },
+      ctx,
+    );
     expect(emissions).toBe(4);
 
     rmSync(cwd, { recursive: true, force: true });
@@ -854,7 +1286,8 @@ describe("single source of truth for session state", () => {
 
     // Service accessor must see the session approval.
     // Before the fix this was "ask" — the service read an empty SessionRules.
-    const serviceResult = getRootPermissionsService()!.checkPermission("demo");
+    const serviceResult =
+      getPermissionsService("sot-session")!.checkPermission("demo");
     expect(serviceResult.state).toBe("allow");
 
     rmSync(cwd, { recursive: true, force: true });
@@ -876,7 +1309,10 @@ describe("service path queries evaluate the supplied path (#503)", () => {
     piPermissionSystemExtension(pi as unknown as ExtensionAPI);
     await fireSessionStart(pi, makeChildCtx(cwd, "svc-path-session"));
 
-    const result = getRootPermissionsService()!.checkPermission("path", target);
+    const result = getPermissionsService("svc-path-session")!.checkPermission(
+      "path",
+      target,
+    );
     expect(result.state).toBe("deny");
 
     rmSync(cwd, { recursive: true, force: true });
@@ -898,7 +1334,10 @@ describe("project trust gates project-scoped config (#644)", () => {
 
     // Global `deny` survives: the untrusted project scope was never loaded.
     expect(
-      getRootPermissionsService()!.checkPermission("bash", "echo hi").state,
+      getPermissionsService("untrusted-session")!.checkPermission(
+        "bash",
+        "echo hi",
+      ).state,
     ).toBe("deny");
 
     rmSync(cwd, { recursive: true, force: true });
@@ -918,7 +1357,10 @@ describe("project trust gates project-scoped config (#644)", () => {
 
     // The trusted project override applies (last-match-wins).
     expect(
-      getRootPermissionsService()!.checkPermission("bash", "echo hi").state,
+      getPermissionsService("trusted-session")!.checkPermission(
+        "bash",
+        "echo hi",
+      ).state,
     ).toBe("allow");
 
     rmSync(cwd, { recursive: true, force: true });
@@ -1121,49 +1563,6 @@ describe("bash bare-token path gating (#509, #645)", () => {
   });
 });
 
-describe("multi-instance global service interplay", () => {
-  // The fix (#302) scopes the process-global service slot to the publishing
-  // instance. The parent publishes at its session_start; an in-process child
-  // (registered by session id) skips publishing, and its identity-scoped
-  // teardown is a no-op — so the parent's service is the one that resolves
-  // throughout the child's lifecycle and survives the child's shutdown.
-  it("keeps the parent's service published across the child's lifecycle", async () => {
-    const parentCwd = mkdtempSync(join(tmpdir(), "pi-perm-parent-cwd-"));
-    const childCwd = mkdtempSync(join(tmpdir(), "pi-perm-child-cwd-"));
-    const childSessionId = "child-session-mi";
-
-    const parentPi = makeFakePi({ events: createEventBus() });
-    piPermissionSystemExtension(parentPi as unknown as ExtensionAPI);
-    const childPi = makeFakePi({ events: createEventBus() });
-    piPermissionSystemExtension(childPi as unknown as ExtensionAPI);
-
-    // The parent is not a registered child, so it publishes its service.
-    await fireSessionStart(
-      parentPi,
-      makeChildCtx(parentCwd, "parent-session-mi"),
-    );
-    const parentService = getRootPermissionsService();
-    expect(parentService).toBeDefined();
-
-    // The child is registered in the shared global registry before its own
-    // session_start, so it detects itself and skips publishing.
-    getSubagentSessionRegistry().register(childSessionId, {
-      parentSessionId: "parent-session-mi",
-    });
-    await fireSessionStart(childPi, makeChildCtx(childCwd, childSessionId));
-
-    // Mid-run: the slot resolves the parent's service, never the child's.
-    expect(getRootPermissionsService()).toBe(parentService);
-
-    // The child's shutdown is a no-op for the slot it never owned.
-    await childPi.fire("session_shutdown");
-    expect(getRootPermissionsService()).toBe(parentService);
-
-    rmSync(parentCwd, { recursive: true, force: true });
-    rmSync(childCwd, { recursive: true, force: true });
-  });
-});
-
 describe("session-keyed service publication", () => {
   // ADR 0012 decision 2: registrations never cross a node boundary. Each node
   // publishes under its own session id, so a sibling extension loaded into an
@@ -1351,9 +1750,9 @@ describe("session approvals do not leak across same-cwd session switches", () =>
       { toolName: "demo", toolCallId: "demo-approve", input: { foo: "bar" } },
       firstCtx,
     );
-    expect(getRootPermissionsService()!.checkPermission("demo").state).toBe(
-      "allow",
-    );
+    expect(
+      getPermissionsService("switch-session-1")!.checkPermission("demo").state,
+    ).toBe("allow");
 
     // The switch tears down the old session before the new one starts.
     await firstPi.fire("session_shutdown");
@@ -1366,9 +1765,9 @@ describe("session approvals do not leak across same-cwd session switches", () =>
 
     // The previous session's approval must not be visible: `demo` is back to
     // its configured `ask`, not the carried-over `allow`.
-    expect(getRootPermissionsService()!.checkPermission("demo").state).toBe(
-      "ask",
-    );
+    expect(
+      getPermissionsService("switch-session-2")!.checkPermission("demo").state,
+    ).toBe("ask");
 
     rmSync(cwd, { recursive: true, force: true });
   });
@@ -1563,10 +1962,16 @@ describe("yolo grants asks synthesized after resolution", () => {
     permission: { "*": "allow", bash: { "*": "allow" } },
   };
 
+  // The inner command must be one the pure-reader core does not cover, or the
+  // wrapper is exempt from the floor and there is no synthesized ask left for
+  // yolo to reconcile — which would make both tests below pass for the wrong
+  // reason (#803).
+  const flooredWrapper = "git status | xargs rm -rf";
+
   it("auto-approves an indirection wrapper under yolo", async () => {
     const outcome = await runBashCommand(
       { ...permissiveBash, yoloMode: true },
-      "git status | xargs grep foo",
+      flooredWrapper,
     );
 
     expect(outcome).toEqual({ blocked: false, prompts: [] });
@@ -1575,12 +1980,23 @@ describe("yolo grants asks synthesized after resolution", () => {
   it("still floors an indirection wrapper to a prompt with yolo off", async () => {
     const outcome = await runBashCommand(
       { ...permissiveBash, yoloMode: false },
-      "git status | xargs grep foo",
+      flooredWrapper,
     );
 
     expect(outcome.blocked).toBe(false);
     expect(outcome.prompts).toHaveLength(1);
     expect(outcome.prompts[0]).toContain("<indirection-bash-wrapper>");
+  });
+
+  it("never raises the ask for a wrapper running a pure reader", async () => {
+    // The relief #803 ships, end to end through the real extension: no floor is
+    // synthesized, so yolo has nothing to reconcile and the user sees nothing.
+    const outcome = await runBashCommand(
+      { ...permissiveBash, yoloMode: false },
+      "git status | xargs grep foo",
+    );
+
+    expect(outcome).toEqual({ blocked: false, prompts: [] });
   });
 
   it("auto-approves an unparseable command under yolo", async () => {
@@ -1611,5 +2027,81 @@ describe("yolo grants asks synthesized after resolution", () => {
     );
 
     expect(outcome).toEqual({ blocked: true, prompts: [] });
+  });
+});
+
+describe("directional external-directory relief (#806)", () => {
+  // The change's user-visible payoff: an `external_directory_read` grant
+  // silences a read outside the working tree while a write to the same path
+  // still prompts. Drives the real factory end to end.
+  async function runPathTool(
+    config: Record<string, unknown>,
+    toolName: string,
+    path: string,
+  ): Promise<{ blocked: boolean; prompts: string[] }> {
+    writeGlobalConfig(config);
+    const cwd = mkdtempSync(join(tmpdir(), "pi-perm-directional-cwd-"));
+    const pi = makeFakePi({ toolNames: ["read", "write", "edit"] });
+    piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+    const prompts: string[] = [];
+    const { ctx } = makeUiCtx(cwd, prompts);
+    await fireSessionStart(pi, ctx);
+
+    const result = (await pi.fire(
+      "tool_call",
+      { toolName, toolCallId: "dir-1", input: { path } },
+      ctx,
+    )) as { block?: true };
+
+    rmSync(cwd, { recursive: true, force: true });
+    return { blocked: result.block === true, prompts };
+  }
+
+  const externalRoot = "/tmp/pi-perm-directional-target";
+  const externalPath = `${externalRoot}/notes.md`;
+  const readRelief = {
+    permission: {
+      "*": "allow",
+      external_directory: { "*": "ask" },
+      external_directory_read: { [`${externalRoot}/*`]: "allow" },
+    },
+  };
+
+  it("silences a read the directional grant covers", async () => {
+    const outcome = await runPathTool(readRelief, "read", externalPath);
+    expect(outcome).toEqual({ blocked: false, prompts: [] });
+  });
+
+  it("still prompts for a write to the same path", async () => {
+    const outcome = await runPathTool(readRelief, "write", externalPath);
+    expect(outcome.blocked).toBe(false);
+    expect(outcome.prompts).toHaveLength(1);
+  });
+
+  it("still prompts for an edit, which reads and writes", async () => {
+    const outcome = await runPathTool(readRelief, "edit", externalPath);
+    expect(outcome.blocked).toBe(false);
+    expect(outcome.prompts).toHaveLength(1);
+  });
+
+  it("prompts for a read the grant does not cover", async () => {
+    const outcome = await runPathTool(
+      readRelief,
+      "read",
+      "/tmp/pi-perm-directional-elsewhere/notes.md",
+    );
+    expect(outcome.blocked).toBe(false);
+    expect(outcome.prompts).toHaveLength(1);
+  });
+
+  it("keeps a bare external_directory config prompting every direction", async () => {
+    const bare = {
+      permission: { "*": "allow", external_directory: { "*": "ask" } },
+    };
+    for (const toolName of ["read", "write", "edit"]) {
+      const outcome = await runPathTool(bare, toolName, externalPath);
+      expect(outcome.prompts).toHaveLength(1);
+    }
   });
 });

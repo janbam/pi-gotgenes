@@ -86,7 +86,7 @@ Nine steps is a ceiling, not a target — a phase may have one step, or none.
 If discovery surfaced no cause-level finding (Category A–C) and the candidates are polish-only (Category B unit-size, D, E, G symptoms), do not manufacture a full phase — but split the "polish" verdict before defaulting to defer:
 
 - **Scattered trivia** (isolated findings across cold, low-churn files) → **defer**.
-  A phase step is an _area_, not a scattered list; a rename here and a split there is boy-scout-rule work for the implementation prompts (`/tdd-plan`, `/build-plan` via the `tidy-first` skill), not a planned phase.
+  A phase step is an _area_, not a scattered list; a rename here and a split there is boy-scout-rule work for `/plan-issue`'s Tidy-First assessment (via the `tidy-first` skill), not a planned phase.
 - **Concentrated quality/test debt in a hot area** (3+ findings clustered in one churn hotspot or one oversized test file) → a legitimate **craftsmanship lean phase**, whose spine is "pay down concentrated debt in `<area>`."
   This is Beck/Metz craftsmanship, not filler: a hot file whose test-design or naming debt taxes every change earns a focused phase the same way a coupling flaw does.
   Present it as a first-class `ask_user` option alongside defer.
@@ -202,13 +202,13 @@ Priority = Impact × (6 − Risk)
 ## Grouping heuristics
 
 - **One issue per extraction** — each "extract X from Y" is a single issue.
-- **Dependency order** — if Step B depends on Step A's output, order them.
+- **Dependency order** — when one step consumes another's output, place the consumer's section after the producer's; section order is the working sequence.
 - **Independent tracks** — identify parallel tracks (e.g., "bag decomposition" vs. "complexity reduction") that can proceed without blocking each other.
 - **Max 9 steps per phase** — beyond 9, split into two phases.
 - **Test duplication gets its own step** — shared fixture extraction is a distinct concern from production code refactoring.
 - **Group steps into release batches** — a release batch is a coherent set of steps meant to ship together (e.g. a lift-and-shift spine where intermediate steps leave the package in a transitional state).
   A step that can land and release on its own is independently releasable.
-  This is the source of truth `/plan-issue` reads to recommend a release decision and `/ship-issue` confirms — so it must be grep-able, not prose (see Output format).
+  This is the source of truth `/plan-issue` reads to recommend a release decision and `/ship` confirms — so it must be grep-able, not prose (see Output format).
 
 ## Output format
 
@@ -218,34 +218,80 @@ The plan should produce:
    Prefer cause-level metrics recomputable by a single command (a `grep -c`, `wc -l`, or fallow field — e.g. `canConfirm` occurrences in `src/`, role-interface count) and record the recompute command with the metric, so `/finish-phase` can verify delivered vs. predicted deterministically.
    Verify the command against the _predicted_ end state, not only today's tree — a command counting the mechanism being replaced reads 0, not the target, once the replacement lands.
    The fallow health score alone is a poor phase metric — it is blind to the type-level wins (a bug class made unrepresentable) that cause-driven phases produce.
-2. **Step list** — numbered steps, each with:
-   - Title and issue reference
+2. **Step list** — steps in working-sequence order, each with:
+   - Title, with the step's issue number as its identity
    - **Cause** — the first-principles structural cause the step dissolves (name it explicitly), with any fallow signal cited as the _symptom_ of that cause, not the motivation.
      A step whose only stated justification is a fallow finding is a symptom-driven step; trace it to a cause or drop it.
    - What smell it addresses (Category A–F)
    - Specific files/functions targeted
    - Expected measurable outcome (LOC reduction, complexity drop, bag field reduction)
+   - **Commit type** — the conventional-commit type the step's release vehicle carries (`fix:`, `feat:`, `refactor:`, …), including a `!` where the operator has settled the bump note as breaking; write `to be decided at plan time` rather than guessing when the step is design-first.
    - **Impact / Risk / Priority** — the per-step scores from the prioritization framework (`Priority = Impact × (6 − Risk)`), published on the step so the ranking is auditable in the committed roadmap (and at `/plan-issue` time), not left in the session transcript.
+
+   Render each step in this exact shape — a bold `**Cause:**` lead paragraph, then a bulleted list with bold field labels, `Commit type` and `Impact/Risk/Priority` last, and any step-specific field (`Constraint`, `Design question(s) the step must settle`, `Hard dependency`, `Soft dependency`, `Design note`, …) inserted between `Target` and `Outcome` in whatever order the step needs.
+   A step is identified by its **GitHub issue number**, never by an ordinal, and the order of the sections _is_ the recommended working sequence.
+   Inserting a step at any priority is therefore "write the section where it belongs" — nothing renumbers, because nothing is numbered.
+   Mid-phase insertion is the normal case rather than the exception: append-only numbering is what mid-phase discovery produces, so the operation to keep cheap is insertion at an arbitrary position.
+   Issue numbers sort chronologically, so identity preserves provenance for free.
+   A step that absorbs a folded-in issue leads with its primary issue and names the fold-in as a suffix (`#### [#802] Title (with [#892])`), which keeps the primary issue countable and the two roles distinct:
+
+   ```markdown
+   #### [✅ ][#NNN] Title
+
+   **Cause:** the first-principles structural cause, as prose (one sentence per line; a second sentence continues on the next line with no blank line between).
+
+   - **Smell:** Category X (...).
+   - **Target:** the files/functions the step touches.
+   - **Outcome:** the measurable, falsifiable result.
+   - **Commit type:** `fix:` (or whatever the release vehicle is).
+   - **Impact N / Risk N / Priority N.**
+
+   Release: independent | batch "<batch-name>"
+   ```
+
+   A multi-sentence field continues on indented lines under its own bullet (2-space GFM list-item continuation), never as a second unlabeled paragraph, and once a step lands its planned `**Cause:**`/bulleted-field block is left as originally written (it is the record of what was proposed) with a `Landed:` prose paragraph (or `Dogfooded:`, `Note:`, etc. as the situation warrants) appended after it, narrating what actually shipped and where it diverged — plain prose, not bulleted, in keeping with the surrounding narrative style:
+
+   ```markdown
+   - **Design note:** the first sentence of the field.
+     A second sentence continuing the same field, indented under the bullet.
+   ```
+
 3. **Step dependency diagram** — Mermaid flowchart showing which steps unblock others.
-4. **Tracks** — group steps into named parallel tracks.
+   It stays purely structural: it lays out by dependency, not by sequence.
+   Node IDs take the form `S<issue>` (a valid Mermaid identifier, unlike a bare number) and the label carries the bare issue number, because that is what `/tdd-plan`'s and `/build-plan`'s `✅`-mark verification counts:
+
+   ```text
+   S857["✅ #857<br/>Workspace-backed resume"] --> S878["✅ #878<br/>Resume affordance honesty"]
+   ```
+
+   A `[#N]` reference link does not render inside a Mermaid label, so the node uses the bare form while the heading uses the link.
+4. **Tracks** — group steps into named parallel tracks, naming members as `[#N]` (`**Track A — Result delivery:** [#857] → [#878]`).
 5. **Release batches** — make release coordination grep-able, in two artifacts:
-   - A per-step `Release:` tag on its own line in each step (alongside `Smell:`/`Outcome:`), exactly one of:
-     - `Release: independent` — the step ships on its own; no coordination.
-     - `Release: batch "<batch-name>"` — the step is a member of the named batch and is meant to ship together with the rest of that batch.
-   - A `Release batches` subsection (after the parallel tracks) naming each batch and listing its member steps in dependency order; the **last listed member is the batch tail** — the step whose landing completes the batch.
-     List independently releasable steps separately.
+
+- A per-step `Release:` tag on its own line in each step (alongside `Smell:`/`Outcome:`), exactly one of:
+  - `Release: independent` — the step ships on its own; no coordination.
+  - `Release: batch "<batch-name>"` — the step is a member of the named batch and is meant to ship together with the rest of that batch.
+- A `Release batches` subsection (after the parallel tracks) naming each batch and listing its member steps in dependency order; the **last listed member is the batch tail** — the step whose landing completes the batch.
+
+  List independently releasable steps separately.
 
      ```markdown
      ### Release batches
 
-     - **Batch "activity-disentanglement":** Steps 1, 2, 3 (ship together; tail = Step 3).
-     - Independently releasable: Steps 4, 5.
+     - **Batch "activity-disentanglement":** [#301], [#302], [#303] (ship together; tail = [#303]).
+     - Independently releasable: [#304], [#305].
      ```
 
-   Agents locate the data by grepping for the `Release:` line (per step) and the `Release batches` heading (per phase) — never by parsing prose.
-   A step with no `Release:` tag defaults to independently releasable.
-   A phase may mix commit types: a `fix:` (or unhidden `docs:`) step is the phase's release vehicle, while `refactor:`/`test:` steps are hidden changelog types that cut no release on their own — name the release vehicle in the `Release batches` subsection instead of assuming a refactor-only phase.
-6. **Open-issue sweep dispositions** — the Step 2 verdicts, under a `#### Open-issue sweep dispositions` heading inside the roadmap's `### Findings (planned YYYY-MM-DD)` section.
+  Agents locate the data by grepping for the `Release:` line (per step) and the `Release batches` heading (per phase) — never by parsing prose.
+  A step with no `Release:` tag defaults to independently releasable.
+  A phase may mix commit types: a `fix:` (or unhidden `docs:`) step is the phase's release vehicle, while `refactor:`/`test:` steps are hidden changelog types that cut no release on their own — name the release vehicle in the `Release batches` subsection instead of assuming a refactor-only phase.
+
+6. **A format a checker reads.**
+   `./scripts/roadmap-check.mjs <pkg>` validates the published inputs above against each other, so four structural anchors are load-bearing: the `### Steps` subsection steps are taken from, the single ```mermaid fence, `### Parallel tracks`, and `### Release batches`.
+   It verifies that `Priority` equals `Impact × (6 − Risk)` rather than taking the published product on trust, that every step carries exactly one recognized `Release:` tag whose batch resolves to a bullet, that steps and diagram nodes correspond, and that the hard-dependency graph is acyclic.
+   It also holds each `**Hard dependency:**` bullet to the diagram's solid edges in both directions — the diagram is the dependency authority and the bullet is the explanation — and reports a step named in no track or no release batch.
+   Run it before committing a roadmap (Refs #894).
+7. **Open-issue sweep dispositions** — the Step 2 verdicts, under a `#### Open-issue sweep dispositions` heading inside the roadmap's `### Findings (planned YYYY-MM-DD)` section.
    Use that exact spelling: the `roadmap-fit` skill appends a bullet to it whenever an issue is spun off mid-phase, and `/finish-phase` greps it to reconcile phase-born issues before archiving.
    A bold prose lead-in or a per-phase variant (`Deferred work (explicit dispositions, …)`) breaks both.
    Each entry is `[#N] — <disposition>` plus a sentence of rationale; several issues sharing one verdict may share one bullet.

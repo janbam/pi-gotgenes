@@ -8,9 +8,19 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-
-import { asDecisionSource } from "#src/authority/decision-source";
-import { isPermissionDecisionState } from "#src/authority/permission-dialog";
+import {
+  OWNER_ONLY_DIRECTORY_MODE,
+  OWNER_ONLY_FILE_MODE,
+} from "#src/logging/log-file-permissions";
+import type { DebugReviewLogger } from "#src/logging/session-logger";
+import { asPromptPayload } from "#src/presentation/prompt-payload";
+import type { PermissionUiPromptSource } from "#src/service/permission-events";
+import {
+  type ApprovalGrant,
+  isSessionGrantWidth,
+} from "#src/session/approval-grant";
+import { asDecisionSource } from "./decision-source";
+import { isPermissionDecisionState } from "./permission-dialog";
 import {
   createPermissionForwardingLocation,
   type ForwardedAccessIntent,
@@ -18,14 +28,11 @@ import {
   type ForwardedPermissionResponse,
   type ForwardedSessionApproval,
   type PermissionForwardingLocation,
-} from "#src/authority/permission-forwarding";
+} from "./permission-forwarding";
 import {
-  OWNER_ONLY_DIRECTORY_MODE,
-  OWNER_ONLY_FILE_MODE,
-} from "#src/log-file-permissions";
-import type { PermissionUiPromptSource } from "#src/permission-events";
-import { asPromptPayload } from "#src/presentation/prompt-payload";
-import type { DebugReviewLogger } from "#src/session-logger";
+  retryOnTransientFsError,
+  type TransientFsRetryRecord,
+} from "./transient-fs-retry";
 
 /** Valid `permissions:ui_prompt` source values, for tolerant request reads. */
 const UI_PROMPT_SOURCES = [
@@ -49,12 +56,34 @@ function asNullableDisplayString(value: unknown): string | null | undefined {
   return undefined;
 }
 
+/** Narrow an unknown value to an `ApprovalGrant`, or `undefined`. */
+function asApprovalGrant(value: unknown): ApprovalGrant | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as Partial<ApprovalGrant>;
+  if (
+    typeof candidate.surface !== "string" ||
+    candidate.surface.length === 0 ||
+    typeof candidate.pattern !== "string"
+  ) {
+    return undefined;
+  }
+  return { surface: candidate.surface, pattern: candidate.pattern };
+}
+
 /**
  * Narrow an unknown value to a `ForwardedSessionApproval`, or `undefined`.
  *
  * Tolerant read: the child's session-approval suggestion is optional (absent
- * on an older child) and only accepted when well-formed — a non-empty surface
- * and an all-string patterns array.
+ * on an older child) and only accepted when well-formed — a non-empty `grants`
+ * array whose every entry names a non-empty surface and a pattern. The
+ * pre-#810 shape (`surface` plus `patterns`) is rejected rather than
+ * normalized, so a version-skewed request drops the suggestion and the serving
+ * dialog offers no whole-session scope.
+ *
+ * An empty `grants` array is rejected too: it would record nothing while still
+ * writing a `forwarded_permission.session_recorded` entry claiming it had.
  */
 function asForwardedSessionApproval(
   value: unknown,
@@ -63,15 +92,16 @@ function asForwardedSessionApproval(
     return undefined;
   }
   const candidate = value as Partial<ForwardedSessionApproval>;
-  if (
-    typeof candidate.surface !== "string" ||
-    candidate.surface.length === 0 ||
-    !Array.isArray(candidate.patterns) ||
-    !candidate.patterns.every((pattern) => typeof pattern === "string")
-  ) {
+  if (!Array.isArray(candidate.grants) || candidate.grants.length === 0) {
     return undefined;
   }
-  return { surface: candidate.surface, patterns: [...candidate.patterns] };
+  const grants: ApprovalGrant[] = [];
+  for (const entry of candidate.grants) {
+    const grant = asApprovalGrant(entry);
+    if (!grant) return undefined;
+    grants.push(grant);
+  }
+  return { grants };
 }
 
 /**
@@ -191,7 +221,14 @@ export function ensureDirectoryExists(
   description: string,
 ): boolean {
   try {
-    mkdirSync(path, { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
+    recordFsRetry(
+      logger,
+      "mkdir",
+      path,
+      retryOnTransientFsError(() => {
+        mkdirSync(path, { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
+      }),
+    );
     return true;
   } catch (error) {
     logPermissionForwardingError(
@@ -373,15 +410,49 @@ export function writeJsonFileAtomic(
   try {
     // `rename` preserves the temp file's mode, so setting it here is enough —
     // a response overwriting an existing file also comes through a fresh temp.
+    // The temp write is deliberately outside the retry: its failure shape is a
+    // write-denied directory, which no number of attempts resolves.
     writeFileSync(tempPath, JSON.stringify(value), {
       encoding: "utf-8",
       mode: OWNER_ONLY_FILE_MODE,
     });
-    renameSync(tempPath, filePath);
+    recordFsRetry(
+      logger,
+      "rename",
+      filePath,
+      retryOnTransientFsError(() => {
+        renameSync(tempPath, filePath);
+      }),
+    );
   } catch (error) {
     safeDeleteFile(logger, tempPath, "temporary permission-forwarding");
     throw error;
   }
+}
+
+/**
+ * Record a filesystem operation that only succeeded after retrying.
+ *
+ * Debug-only: a recovered write decided nothing, so it does not belong in the
+ * permission-decision record — but `attempts` and `code` are the whole
+ * diagnosis when a host keeps losing writes, and `debugLog` is exactly the
+ * switch a user reaching for that diagnosis turns on.
+ */
+function recordFsRetry(
+  logger: DebugReviewLogger | null,
+  operation: "rename" | "mkdir",
+  path: string,
+  record: TransientFsRetryRecord,
+): void {
+  if (record.attempts === 1) {
+    return;
+  }
+  logger?.debug("permission_forwarding.fs_retried", {
+    operation,
+    path,
+    attempts: record.attempts,
+    code: record.code,
+  });
 }
 
 export function readForwardedPermissionRequest(
@@ -471,6 +542,11 @@ export function readForwardedPermissionResponse(
       // record is dropped, but the decision itself still has to reach the
       // requester, so it never rejects the response.
       decidedBy: asDecisionSource(parsed.decidedBy),
+      // Tolerant for the same reason, and least-privilege when it fires: a
+      // dropped width records the grant on the surface the gate proved.
+      sessionGrantWidth: isSessionGrantWidth(parsed.sessionGrantWidth)
+        ? parsed.sessionGrantWidth
+        : undefined,
     };
   } catch (error) {
     logPermissionForwardingWarning(

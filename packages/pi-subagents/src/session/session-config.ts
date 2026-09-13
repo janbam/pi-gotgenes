@@ -15,7 +15,12 @@ import type { AgentConfigLookup } from "#src/config/agent-types";
 import type { EnvInfo } from "#src/session/env";
 import type { ModelRegistry } from "#src/session/model-resolver";
 import type { InheritedPrompt } from "#src/session/prompts";
-import type { AgentPromptConfig, SubagentType, ThinkingLevel } from "#src/types";
+import type {
+  AgentPromptConfig,
+  PromptInheritance,
+  SubagentType,
+  ThinkingLevel,
+} from "#src/types";
 
 // ── Public interfaces ────────────────────────────────────────────────────────
 
@@ -49,6 +54,13 @@ export interface AssemblerContext {
   cwd: string;
   /** Parent's effective system prompt (for append-mode agents). */
   parentSystemPrompt: string;
+  /** Parent's operator-authored parts, for a child on a re-homing provider. */
+  parentPortablePrompt?: string;
+  /**
+   * Which prompt-inheritance strategy the child's provider calls for.
+   * Absent resolves every child to `"full"`.
+   */
+  resolvePromptInheritance?: (provider: string | undefined) => PromptInheritance;
   /** Parent's current model instance (fallback when agent config has no model). */
   parentModel?: Model<any>;
   /** Model registry for resolving config.model strings. */
@@ -155,16 +167,23 @@ export function assembleSessionConfig(
 
   const toolNames = registry.getToolNamesForType(type);
 
-  // Build system prompt from the resolved agent config
-  const systemPrompt = io.buildAgentPrompt(agentConfig, effectiveCwd, env, {
-    systemPrompt: ctx.parentSystemPrompt,
-    cwd: ctx.cwd,
-  });
-
-  // Model resolution: explicit option > config model string > parent model
+  // Model resolution: explicit option > config model string > parent model.
+  // Resolved before the prompt because the child's provider is what selects a
+  // prompt-inheritance strategy; the two computations are otherwise
+  // independent, so the order is free.
   const model =
     options.model ??
     resolveDefaultModel(ctx.parentModel, ctx.modelRegistry, agentConfig.model);
+
+  // Build system prompt from the resolved agent config. The strategy is keyed
+  // on the child's own provider, so a per-spawn model override moves the child
+  // between transports and takes the right strategy with it.
+  const systemPrompt = io.buildAgentPrompt(agentConfig, effectiveCwd, env, {
+    systemPrompt: ctx.parentSystemPrompt,
+    cwd: ctx.cwd,
+    strategy: ctx.resolvePromptInheritance?.(model?.provider) ?? "full",
+    portablePrompt: ctx.parentPortablePrompt,
+  });
 
   // Thinking level: explicit option > agent config > undefined (inherit)
   const thinkingLevel = options.thinkingLevel ?? agentConfig.thinking;

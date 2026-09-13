@@ -1,8 +1,9 @@
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
 import type { AgentSpawnConfig } from "#src/lifecycle/subagent-manager";
-import { textResult } from "#src/tools/helpers";
+import { renderSpawnNotes, textResult } from "#src/tools/helpers";
 import type { ResolvedSpawnConfig } from "#src/tools/spawn-config";
 import type { ParentSessionInfo, Subagent } from "#src/types";
+import type { AgentDetails } from "#src/ui/display";
 
 /** Narrow manager interface for the background spawner. */
 export interface BackgroundManagerDeps {
@@ -26,7 +27,7 @@ export function spawnBackground(
   manager: BackgroundManagerDeps,
   params: BackgroundParams,
 ) {
-  const { identity, execution, presentation } = params.config;
+  const { identity, execution, presentation, notes } = params.config;
 
   let id: string;
   try {
@@ -37,8 +38,9 @@ export function spawnBackground(
       maxTurns: execution.effectiveMaxTurns,
       inheritContext: execution.inheritContext,
       thinkingLevel: execution.thinking,
-      isBackground: true,
-      invocation: execution.agentInvocation,
+      // resolveSpawnConfig already merged the agent's frontmatter and AgentTool
+      // routed here on the result, so this door has committed.
+      background: { kind: "explicit", isBackground: true },
     });
   } catch (err) {
     return textResult(err instanceof Error ? err.message : String(err));
@@ -47,8 +49,20 @@ export function spawnBackground(
   const record = manager.getRecord(id);
 
   const isQueued = record?.status === "queued";
+  // Annotated rather than inlined into the call: `textResult` is generic over its
+  // details, so an inline literal would define the type instead of being checked
+  // against it.
+  const details: AgentDetails = {
+    ...presentation.detailBase,
+    toolUses: 0,
+    tokens: "",
+    durationMs: 0,
+    status: "background",
+    agentId: id,
+  };
   return textResult(
-    `Agent ${isQueued ? "queued" : "started"} in background.\n` +
+    renderSpawnNotes(notes) +
+      `Agent ${isQueued ? "queued" : "started"} in background.\n` +
       `Agent ID: ${id}\n` +
       `Type: ${identity.displayName}\n` +
       `Description: ${execution.description}\n` +
@@ -59,13 +73,6 @@ export function spawnBackground(
       `\nYou will be notified when this agent completes.\n` +
       `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
       `Do not duplicate this agent's work.`,
-    {
-      ...presentation.detailBase,
-      toolUses: 0,
-      tokens: "",
-      durationMs: 0,
-      status: "background" as const,
-      agentId: id,
-    },
+    details,
   );
 }

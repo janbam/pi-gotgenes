@@ -1,7 +1,11 @@
 import { join } from "node:path";
-import type { DecisionSource } from "#src/authority/decision-source";
-import type { PermissionUiPromptSource } from "#src/permission-events";
 import type { PromptPayload } from "#src/presentation/prompt-payload";
+import type { PermissionUiPromptSource } from "#src/service/permission-events";
+import type {
+  ApprovalGrant,
+  SessionGrantWidth,
+} from "#src/session/approval-grant";
+import type { DecisionSource } from "./decision-source";
 import type { PermissionDecisionState } from "./permission-dialog";
 import type { SubagentSessionRegistry } from "./subagent-registry";
 
@@ -83,16 +87,21 @@ export interface ForwardedPromptDisplay {
 
 /**
  * The child's session-approval suggestion, relayed to the serving node so a
- * human who grants "the whole session" records the same pattern the child
- * would have recorded locally.
+ * human who grants "the whole session" records the same grants the child would
+ * have recorded locally.
  *
  * A plain data shape (not the `SessionApproval` value object) so it serializes
  * onto the forwarded request; the serving node rebuilds a `SessionApproval`
- * from it via `SessionApproval.multiple`.
+ * from it via `SessionApproval.forGrants`.
+ *
+ * Each grant carries its own surface (#810). The pre-#810 shape — one
+ * `surface` plus a `patterns` list — is rejected by the reader rather than
+ * normalized, so a version-skewed pair drops the suggestion and the serving
+ * dialog offers no whole-session scope; the requesting child still records its
+ * own grant, so the failure is narrow in both directions.
  */
 export interface ForwardedSessionApproval {
-  surface: string;
-  patterns: readonly string[];
+  grants: readonly ApprovalGrant[];
 }
 
 /**
@@ -192,6 +201,16 @@ export type ForwardedPermissionResponse = {
    * rejecting the answer.
    */
   decidedBy?: DecisionSource;
+  /**
+   * How wide a session grant the responder's human chose (#813).
+   *
+   * The child records a subagent-scoped grant itself, so the width has to
+   * survive the hop or the parent's choice is silently narrowed back.
+   * Optional for version-skew tolerance in both directions: an older
+   * responder omits it, and an older requester's allowlist rebuild drops it —
+   * both landing on `"proven"`, the least-privilege width.
+   */
+  sessionGrantWidth?: SessionGrantWidth;
 };
 
 export type PermissionForwardingLocation = {
@@ -268,10 +287,9 @@ export function createPermissionForwardingLocation(
  * **in-process** child of `sessionId`, so the two share a `globalThis` and the
  * requester may consult the serving-session registry to decide whether anyone
  * is draining its inbox. `"env"` means the target lives in another process,
- * where that signal is unavailable; `"self"` is the UI host owning its own
- * forwarding location.
+ * where that signal is unavailable.
  */
-export type PermissionForwardingTargetSource = "self" | "registry" | "env";
+export type PermissionForwardingTargetSource = "registry" | "env";
 
 /** The resolved forwarding target together with how it was found. */
 export interface PermissionForwardingTarget {
@@ -279,8 +297,14 @@ export interface PermissionForwardingTarget {
   source: PermissionForwardingTargetSource;
 }
 
+/**
+ * The session this node relays its asks to, or `null` when it has none.
+ *
+ * Answers only "which *other* session", never "myself": a node that owns its
+ * forwarding location has nothing to resolve, and a request filed into one's
+ * own inbox is drained by no watcher.
+ */
 export function resolvePermissionForwardingTarget(options: {
-  hasUI: boolean;
   isSubagent: boolean;
   currentSessionId?: string | null;
   env?: NodeJS.ProcessEnv;
@@ -289,16 +313,17 @@ export function resolvePermissionForwardingTarget(options: {
   /** In-process subagent session registry (checked before env vars). */
   registry?: SubagentSessionRegistry;
 }): PermissionForwardingTarget | null {
-  if (options.hasUI) {
-    const own = normalizePermissionForwardingSessionId(
-      options.currentSessionId,
-    );
-    return own === null ? null : { sessionId: own, source: "self" };
-  }
-
   if (!options.isSubagent) {
     return null;
   }
+
+  // A candidate naming the requester itself is not a usable target: the
+  // request would land in an inbox this node is not draining, and no other node
+  // would ever answer it. A child's own copy of a subagent extension can
+  // overwrite the spawner's marker with the child's own session id, which is
+  // how such a candidate arises (#907).
+  const own = normalizePermissionForwardingSessionId(options.currentSessionId);
+  const namesAnotherSession = (candidate: string): boolean => candidate !== own;
 
   // 1. Registry — in-process subagents register parentSessionId explicitly.
   if (options.registry && options.sessionId) {
@@ -306,14 +331,18 @@ export function resolvePermissionForwardingTarget(options: {
     const resolved = normalizePermissionForwardingSessionId(
       entry?.parentSessionId,
     );
-    if (resolved) return { sessionId: resolved, source: "registry" };
+    if (resolved && namesAnotherSession(resolved)) {
+      return { sessionId: resolved, source: "registry" };
+    }
   }
 
   // 2. Env vars — process-based subagent extensions.
   const env = options.env ?? process.env;
   for (const key of SUBAGENT_PARENT_SESSION_ENV_CANDIDATES) {
     const resolved = normalizePermissionForwardingSessionId(env[key]);
-    if (resolved) return { sessionId: resolved, source: "env" };
+    if (resolved && namesAnotherSession(resolved)) {
+      return { sessionId: resolved, source: "env" };
+    }
   }
   return null;
 }

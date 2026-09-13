@@ -6,6 +6,7 @@
  * Consumed by the renderResult hook in agent-tool.ts.
  */
 
+import type { SubagentStatus } from "#src/lifecycle/subagent-state";
 import type { AgentDetails, Theme } from "#src/ui/display";
 import { formatMs, formatTurns } from "#src/ui/display";
 import { GLYPHS, SPINNER } from "#src/ui/glyphs";
@@ -53,9 +54,7 @@ export function renderCompleted(
 ): string {
 	const duration = formatMs(details.durationMs);
 	const isSteered = details.status === "steered";
-	const icon = isSteered
-		? theme.fg("warning", GLYPHS.success)
-		: theme.fg("success", GLYPHS.success);
+	const icon = renderStatusIcon(isSteered ? "steered" : "completed", theme);
 	const s = renderStats(details, theme);
 	let line = icon + (s ? " " + s : "");
 	line += " " + theme.fg("dim", "\u00B7") + " " + theme.fg("dim", duration);
@@ -77,8 +76,7 @@ export function renderCompleted(
 				);
 		}
 	}
-	// Done footer in both views — carries the agent ID so a completed result
-	// stays referenceable, mirroring the background launch line.
+	// Keep every terminal result referenceable in both collapsed and expanded views.
 	line += "\n" + doneLine;
 	return line;
 }
@@ -86,7 +84,7 @@ export function renderCompleted(
 /** Render stopped status: dim stop icon + stats + "Stopped". */
 export function renderStopped(details: AgentDetails, theme: Theme): string {
 	const s = renderStats(details, theme);
-	let line = theme.fg("dim", GLYPHS.stopped) + (s ? " " + s : "");
+	let line = renderStatusIcon("stopped", theme) + (s ? " " + s : "");
 	line += "\n" + theme.fg("dim", `  ${GLYPHS.subLine}  Stopped${idSuffix(details)}`);
 	return line;
 }
@@ -94,7 +92,7 @@ export function renderStopped(details: AgentDetails, theme: Theme): string {
 /** Render error or aborted status: error icon + stats + status message. */
 export function renderFailed(details: AgentDetails, theme: Theme): string {
 	const s = renderStats(details, theme);
-	let line = theme.fg("error", GLYPHS.failure) + (s ? " " + s : "");
+	let line = renderStatusIcon(details.status === "error" ? "error" : "aborted", theme) + (s ? " " + s : "");
 
 	if (details.status === "error") {
 		line +=
@@ -108,11 +106,36 @@ export function renderFailed(details: AgentDetails, theme: Theme): string {
 	return line;
 }
 
-// ---- Shared helper ----
+// ---- Shared helpers ----
 
 /** " (ID: …)" suffix for terminal result sub-lines; empty when the ID is unknown. */
 function idSuffix(details: AgentDetails): string {
 	return details.agentId ? ` (ID: ${details.agentId})` : "";
+}
+
+/**
+ * The themed status glyph for a settled or pending agent.
+ *
+ * Exhaustive over `SubagentStatus`, so a status added later fails to compile
+ * here rather than falling through to an unmarked icon. Shared with
+ * `get-result-renderer.ts`, which draws the same vocabulary for the same enum.
+ */
+export function renderStatusIcon(status: SubagentStatus, theme: Theme): string {
+	switch (status) {
+		case "completed":
+			return theme.fg("success", GLYPHS.success);
+		case "steered":
+			return theme.fg("warning", GLYPHS.success);
+		case "stopped":
+			return theme.fg("dim", GLYPHS.stopped);
+		case "error":
+		case "aborted":
+			return theme.fg("error", GLYPHS.failure);
+		case "queued":
+			return theme.fg("dim", GLYPHS.queued);
+		case "running":
+			return theme.fg("dim", GLYPHS.streaming);
+	}
 }
 
 /**

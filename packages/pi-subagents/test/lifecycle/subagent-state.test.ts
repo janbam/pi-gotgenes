@@ -4,6 +4,7 @@ import {
 	isRunningStatus,
 	isTerminalErrorStatus,
 	SubagentState,
+	type SubagentStateInit,
 	type SubagentStatus,
 } from "#src/lifecycle/subagent-state";
 
@@ -381,6 +382,58 @@ describe("SubagentState — consumption", () => {
 	});
 });
 
+describe("SubagentState — carrier claim", () => {
+	it("defaults to unclaimed", () => {
+		const state = new SubagentState();
+		expect(state.claimed).toBe(false);
+	});
+
+	it("claim marks the outcome as owned by a carrier", () => {
+		const state = new SubagentState({ status: "running" });
+		state.claim();
+		expect(state.claimed).toBe(true);
+	});
+
+	it("release hands responsibility back", () => {
+		const state = new SubagentState({ status: "running" });
+		state.claim();
+		state.release();
+		expect(state.claimed).toBe(false);
+	});
+
+	it("release without a prior claim is a no-op", () => {
+		const state = new SubagentState({ status: "running" });
+		state.release();
+		expect(state.claimed).toBe(false);
+	});
+
+	it("claim is idempotent", () => {
+		const state = new SubagentState({ status: "running" });
+		state.claim();
+		state.claim();
+		expect(state.claimed).toBe(true);
+	});
+
+	it("is independent of consumption", () => {
+		const state = new SubagentState({ status: "completed" });
+		state.claim();
+		expect(state.consumed).toBe(false);
+		state.markConsumed(5000);
+		state.release();
+		expect(state.claimed).toBe(false);
+		expect(state.consumedAt).toBe(5000);
+	});
+
+	it("survives resetForResume, which clears consumption but not the claim", () => {
+		const state = new SubagentState({ status: "completed" });
+		state.claim();
+		state.markConsumed(5000);
+		state.resetForResume(7000);
+		expect(state.claimed).toBe(true);
+		expect(state.consumedAt).toBeUndefined();
+	});
+});
+
 describe("SubagentState — turnCount", () => {
 	it("defaults to 1", () => {
 		const state = new SubagentState();
@@ -513,5 +566,80 @@ describe("SubagentState — classification predicates", () => {
 				expect(state.canBeSteered()).toBe(running.has(status));
 			});
 		}
+	});
+});
+
+describe("SubagentState — run updates", () => {
+	it("starts with none", () => {
+		expect(new SubagentState().runUpdates).toEqual([]);
+	});
+
+	it("keeps the order the child sent them in", () => {
+		const state = new SubagentState();
+
+		state.recordUpdate("The bug is in the retry wrapper.");
+		state.recordUpdate("The fixture is stale too.");
+
+		expect(state.runUpdates).toEqual([
+			"The bug is in the retry wrapper.",
+			"The fixture is stale too.",
+		]);
+	});
+
+	it("drops the previous run's updates when a fresh run starts", () => {
+		const state = new SubagentState();
+		state.recordUpdate("From the first run.");
+
+		state.markRunning(1000);
+
+		expect(state.runUpdates).toEqual([]);
+	});
+
+	it("drops the previous run's updates when a resume starts", () => {
+		const state = new SubagentState();
+		state.recordUpdate("From the run being resumed.");
+
+		state.resetForResume(2000);
+
+		expect(state.runUpdates).toEqual([]);
+	});
+
+	it("cannot be seeded from a rehydrated record", () => {
+		// Transient runtime state, like the carrier claim: a rehydrated record has
+		// no run to have produced it.
+		const state = new SubagentState({ runUpdates: ["seeded"] } as unknown as SubagentStateInit);
+
+		expect(state.runUpdates).toEqual([]);
+	});
+
+	describe("the announcement latch", () => {
+		it("omits a message the announcement channel delivered", () => {
+			const state = new SubagentState();
+			state.recordUpdate("Announced already.");
+			state.recordUpdate("Still owed to a carrier.");
+
+			state.markUpdateAnnounced("Announced already.");
+
+			expect(state.runUpdates).toEqual(["Still owed to a carrier."]);
+		});
+
+		it("marks the first unannounced copy, leaving a later duplicate owed", () => {
+			const state = new SubagentState();
+			state.recordUpdate("Same finding twice.");
+			state.recordUpdate("Same finding twice.");
+
+			state.markUpdateAnnounced("Same finding twice.");
+
+			expect(state.runUpdates).toEqual(["Same finding twice."]);
+		});
+
+		it("ignores a message this run never produced", () => {
+			const state = new SubagentState();
+			state.recordUpdate("From this run.");
+
+			state.markUpdateAnnounced("From a run that was reset.");
+
+			expect(state.runUpdates).toEqual(["From this run."]);
+		});
 	});
 });

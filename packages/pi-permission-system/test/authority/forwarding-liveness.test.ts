@@ -388,10 +388,6 @@ const ENV_TARGET: PermissionForwardingTarget = {
   sessionId: "parent",
   source: "env",
 };
-const SELF_TARGET: PermissionForwardingTarget = {
-  sessionId: "parent",
-  source: "self",
-};
 
 function makeRegistry(marked: string[] = []) {
   return {
@@ -432,25 +428,16 @@ describe("ForwardingLivenessJudge.isServing", () => {
     expect(judge.isServing(ENV_TARGET)).toBe(true);
   });
 
-  it.each([
-    "absent",
-    "stale",
-    "dead_pid",
-  ] as const)("reports an out-of-process target as not serving when its heartbeat is %s", (state) => {
-    const judge = new ForwardingLivenessJudge({
-      registry: makeRegistry(["parent"]),
-      heartbeats: makeHeartbeats(state),
-    });
-    expect(judge.isServing(ENV_TARGET)).toBe(false);
-  });
-
-  it("declines to judge a session that owns the inbox it is forwarding to", () => {
-    const judge = new ForwardingLivenessJudge({
-      registry: makeRegistry(),
-      heartbeats: makeHeartbeats("absent"),
-    });
-    expect(judge.isServing(SELF_TARGET)).toBeNull();
-  });
+  it.each(["absent", "stale", "dead_pid"] as const)(
+    "reports an out-of-process target as not serving when its heartbeat is %s",
+    (state) => {
+      const judge = new ForwardingLivenessJudge({
+        registry: makeRegistry(["parent"]),
+        heartbeats: makeHeartbeats(state),
+      });
+      expect(judge.isServing(ENV_TARGET)).toBe(false);
+    },
+  );
 
   it("does not touch the filesystem for an in-process target", () => {
     const heartbeats = makeHeartbeats("absent");
@@ -497,18 +484,6 @@ describe("ForwardingLivenessJudge.describe", () => {
       channel: "heartbeat",
       state: "dead_pid",
       servingIds: ["other-parent"],
-    });
-  });
-
-  it("reports no channel for a target it does not judge", () => {
-    const judge = new ForwardingLivenessJudge({
-      registry: makeRegistry(["unrelated"]),
-      heartbeats: makeHeartbeats("alive", ["unrelated"]),
-    });
-    expect(judge.describe(SELF_TARGET)).toEqual({
-      channel: "none",
-      state: null,
-      servingIds: [],
     });
   });
 });

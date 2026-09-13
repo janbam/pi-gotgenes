@@ -1,14 +1,20 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { DebugReviewLogger } from "#src/logging/session-logger";
+import { createPermissionRequestId } from "#src/permission-request-id";
+import type { PromptPayload } from "#src/presentation/prompt-payload";
+import { buildUiPrompt } from "#src/service/permission-ui-prompt";
 import {
   getActiveAgentName,
   getActiveAgentNameFromSystemPrompt,
-} from "#src/active-agent";
+} from "#src/session/active-agent";
+import { toRecord } from "#src/value-guards";
+import type { TerminalAuthorizer } from "./authorizer";
 import {
   type ForwarderContext,
   getCwd,
   getSessionId,
-} from "#src/authority/forwarder-context";
+} from "./forwarder-context";
 import {
   cleanupPermissionForwardingLocationIfEmpty,
   ensurePermissionForwardingLocation,
@@ -18,9 +24,9 @@ import {
   safeDeleteFile,
   sleep,
   writeJsonFileAtomic,
-} from "#src/authority/forwarding-io";
-import type { TargetServingLookup } from "#src/authority/forwarding-liveness";
-import type { PermissionPromptDecision } from "#src/authority/permission-dialog";
+} from "./forwarding-io";
+import type { TargetServingLookup } from "./forwarding-liveness";
+import type { PermissionPromptDecision } from "./permission-dialog";
 import {
   type ForwardedAccessFacts,
   type ForwardedPermissionRequest,
@@ -33,15 +39,9 @@ import {
   type PermissionForwardingTarget,
   resolvePermissionForwardingTarget,
   SUBAGENT_PARENT_SESSION_ENV_CANDIDATES,
-} from "#src/authority/permission-forwarding";
-import type { SubagentSessionRegistry } from "#src/authority/subagent-registry";
-import { createPermissionRequestId } from "#src/permission-request-id";
-import { buildUiPrompt } from "#src/permission-ui-prompt";
-import type { PromptPayload } from "#src/presentation/prompt-payload";
-import type { DebugReviewLogger } from "#src/session-logger";
-import { toRecord } from "#src/value-guards";
-import type { TerminalAuthorizer } from "./authorizer";
+} from "./permission-forwarding";
 import type { PromptPermissionDetails } from "./permission-prompter";
+import type { SubagentSessionRegistry } from "./subagent-registry";
 
 // ── Module-private helpers ────────────────────────────────────────────────
 
@@ -173,10 +173,11 @@ function forwardableRequestId(requesterRequestId: string): string {
  * Owns the escalation-up role of the forwarded-permission behavior: builds
  * and persists a request file, then polls for the parent session's
  * response. `ctx` is bound once at construction — `selectAuthorizer` only
- * constructs a `ParentAuthorizer` for a context it has already confirmed has
- * no UI and is a subagent, so `authorize` never re-derives that dispatch
- * (formerly `ApprovalEscalator.requestApproval`'s `hasUI` / `!isSubagent`
- * arms, both dead once every caller routes through `selectAuthorizer`).
+ * constructs a `ParentAuthorizer` for a context it has already established is a
+ * child, whether that child has a UI of its own (#909) or not, so `authorize`
+ * never re-derives that dispatch (formerly `ApprovalEscalator.requestApproval`'s
+ * `hasUI` / `!isSubagent` arms, both dead once every caller routes through
+ * `selectAuthorizer`).
  */
 export class ParentAuthorizer implements TerminalAuthorizer {
   private readonly forwardingDir: string;
@@ -221,10 +222,9 @@ export class ParentAuthorizer implements TerminalAuthorizer {
   ): Promise<PermissionPromptDecision> {
     const requesterSessionId = getSessionId(ctx);
     const target = resolvePermissionForwardingTarget({
-      hasUI: ctx.hasUI,
-      // Invariant: selectAuthorizer only selects ParentAuthorizer for a
-      // no-UI subagent context, so this is always true — no detection dep
-      // needed to re-derive it here.
+      // Invariant: selectAuthorizer only selects ParentAuthorizer for a context
+      // it has already established is a child — no detection dep needed to
+      // re-derive it here.
       isSubagent: true,
       currentSessionId: requesterSessionId,
       env: process.env,

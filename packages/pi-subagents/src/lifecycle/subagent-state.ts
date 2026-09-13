@@ -50,9 +50,19 @@ export function isRunningStatus(status: SubagentStatus): boolean {
 	return status === "running";
 }
 
+/** One update a child sent during a run, and whether an announcement delivered it. */
+interface RunUpdate {
+	message: string;
+	announced: boolean;
+}
+
 export interface SubagentStateInit {
 	status?: SubagentStatus;
 	result?: string;
+	/** The question the agent ended its turn with — an outcome fact, like result. */
+	pendingQuestion?: string;
+	/** What a teardown with no result text reported — an outcome fact, like result. */
+	workspaceNotice?: string;
 	error?: string;
 	/** Whether the agent was stopped before the limiter ever admitted it. */
 	stoppedWhileQueued?: boolean;
@@ -97,6 +107,41 @@ export class SubagentState {
 	get consumedAt(): number | undefined { return this._consumedAt; }
 	get consumed(): boolean { return this._consumedAt != null; }
 
+	// Result delivery — whether a carrier has committed to delivering the outcome.
+	// Distinct from consumption in two ways. It is revocable, where consumption is
+	// a one-way latch that also times session retention. And it is scoped to the
+	// caller rather than the run: consumedAt records a delivery that has already
+	// happened, so a resume must clear it, while a claim records one that has not
+	// happened yet and stays live across the reset (see resetForResume).
+	// Transient runtime ownership, so deliberately not seedable via
+	// SubagentStateInit — a rehydrated record must not claim a carrier that no
+	// longer exists.
+	private _claimed = false;
+	get claimed(): boolean { return this._claimed; }
+
+	// The question this agent ended its turn with, if it declared one. Part of the
+	// outcome like _result, and set alongside it at the terminal transition.
+	private _pendingQuestion?: string;
+	get pendingQuestion(): string | undefined { return this._pendingQuestion; }
+
+	// What the workspace reported at a teardown with no result text to fold it
+	// into. Part of the outcome like _result, and set at the disposal that
+	// produced it. Undefined for a run whose addendum rode the result instead.
+	private _workspaceNotice?: string;
+	get workspaceNotice(): string | undefined { return this._workspaceNotice; }
+
+	// The updates the child sent during this run, each remembering whether the
+	// announcement channel delivered it — so a message reaches the parent once,
+	// through whichever channel could reach it, and no carrier repeats it.
+	// Scoped to the run, so it clears wherever a run begins.
+	// Transient runtime state, so deliberately not seedable via SubagentStateInit
+	// — a rehydrated record has no run to have produced these.
+	private _runUpdates: RunUpdate[] = [];
+	/** The updates no announcement delivered — what an outcome carrier must render. */
+	get runUpdates(): readonly string[] {
+		return this._runUpdates.filter((update) => !update.announced).map((update) => update.message);
+	}
+
 	// Stats — accumulated via mutation methods, readable via getters
 	private _toolUses: number;
 	get toolUses(): number { return this._toolUses; }
@@ -122,6 +167,8 @@ export class SubagentState {
 	constructor(init: SubagentStateInit = {}) {
 		this._status = init.status ?? "queued";
 		this._result = init.result;
+		this._pendingQuestion = init.pendingQuestion;
+		this._workspaceNotice = init.workspaceNotice;
 		this._error = init.error;
 		this._stoppedWhileQueued = init.stoppedWhileQueued ?? false;
 		this._startedAt = init.startedAt ?? Date.now();
@@ -209,6 +256,22 @@ export class SubagentState {
 	markRunning(startedAt: number): void {
 		this._status = "running";
 		this._startedAt = startedAt;
+		this._runUpdates.length = 0;
+	}
+
+	/** Record an update the child sent during this run, owed to a carrier until delivered. */
+	recordUpdate(message: string): void {
+		this._runUpdates.push({ message, announced: false });
+	}
+
+	/**
+	 * The announcement channel delivered this message, so no outcome carrier may
+	 * repeat it. Marks the first copy still owed: two identical messages are two
+	 * facts the child sent twice, and one announcement delivered one of them.
+	 */
+	markUpdateAnnounced(message: string): void {
+		const owed = this._runUpdates.find((update) => !update.announced && update.message === message);
+		if (owed) owed.announced = true;
 	}
 
 	/**
@@ -267,6 +330,29 @@ export class SubagentState {
 		this._consumedAt ??= at ?? Date.now();
 	}
 
+	/** Record the question the agent ended its turn with. */
+	setPendingQuestion(question: string | undefined): void {
+		this._pendingQuestion = question;
+	}
+
+	/** Record what a teardown reported when no result text could carry it. */
+	setWorkspaceNotice(notice: string): void {
+		this._workspaceNotice = notice;
+	}
+
+	/**
+	 * A carrier has committed to delivering this outcome, so nothing else should
+	 * announce it. Unlike every other transition here, this one is revocable.
+	 */
+	claim(): void {
+		this._claimed = true;
+	}
+
+	/** The carrier abandoned its commitment; announcing is owed again. */
+	release(): void {
+		this._claimed = false;
+	}
+
 	/** Transition to stopped state. Always valid — no guard. */
 	markStopped(completedAt?: number): void {
 		this._status = "stopped";
@@ -283,7 +369,15 @@ export class SubagentState {
 		this.markStopped(completedAt);
 	}
 
-	/** Reset for resume: running status, new startedAt, clear completedAt/result/error/consumedAt. */
+	/**
+	 * Reset for resume: running status, new startedAt, clear
+	 * completedAt/result/error/consumedAt.
+	 *
+	 * The carrier claim deliberately survives: it belongs to the caller that asked
+	 * for the resume and will deliver its outcome, not to the run being reset.
+	 * Clearing it here would drop the claim before the caller could observe it,
+	 * since this runs synchronously before resume() returns.
+	 */
 	resetForResume(startedAt: number): void {
 		this._status = "running";
 		this._startedAt = startedAt;
@@ -291,5 +385,10 @@ export class SubagentState {
 		this._result = undefined;
 		this._error = undefined;
 		this._consumedAt = undefined;
+		// A resumed run answers the old question; whether it asks a new one is
+		// decided when it terminates.
+		this._pendingQuestion = undefined;
+		// The updates belong to the run that produced them, and this starts another.
+		this._runUpdates.length = 0;
 	}
 }

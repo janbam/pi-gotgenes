@@ -16,15 +16,24 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
   type SettingsManager,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfigLookup } from "#src/config/agent-types";
 import type { ChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
 import { SubagentSession } from "#src/lifecycle/subagent-session";
+import { AskParentTool, type QuestionRecorder } from "#src/session/ask-parent-tool";
 import type { EnvInfo } from "#src/session/env";
 import type { ModelRegistry } from "#src/session/model-resolver";
+import { NotifyParentTool, type UpdateAnnouncer } from "#src/session/notify-parent-tool";
 import { type AssemblerIO, assembleSessionConfig } from "#src/session/session-config";
-import type { ParentSessionInfo, ShellExec, SubagentType, ThinkingLevel } from "#src/types";
+import type {
+  ParentSessionInfo,
+  PromptInheritance,
+  ShellExec,
+  SubagentType,
+  ThinkingLevel,
+} from "#src/types";
 
 /**
  * Recursion guard: names of tools registered by this extension that subagents
@@ -73,6 +82,12 @@ export interface CreateSessionOptions {
   model?: Model<any>;
   /** Allowlist: only these tool names are enabled in the session. */
   tools: string[];
+  /**
+   * Tool definitions supplied directly rather than by an extension. The SDK
+   * filters these through `tools` too, so every name here must also be listed
+   * there or the definition is silently dropped.
+   */
+  customTools?: ToolDefinition[];
   /** Denylist applied after `tools`, on every tool-registry rebuild. */
   excludeTools?: string[];
   resourceLoader: ResourceLoaderLike;
@@ -129,6 +144,14 @@ export interface SubagentSessionDeps {
   registry: AgentConfigLookup;
   /** Publishes the child-execution lifecycle so consumers can observe it. */
   lifecycle: ChildLifecyclePublisher;
+  /**
+   * Which prompt-inheritance strategy a child on the given provider adopts.
+   *
+   * Resolved at the composition root from the operator's settings, so this
+   * factory stays policy-free — the same shape the extension-exclusion policy
+   * reaches it in.
+   */
+  resolvePromptInheritance: (provider: string | undefined) => PromptInheritance;
 }
 
 /** Per-spawn parameters — the fields that vary per child session. */
@@ -141,6 +164,32 @@ export interface CreateSubagentSessionParams {
   parentSession?: ParentSessionInfo;
   model?: Model<any>;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Records a question the child declares with `ask_parent`. Supplied for every
+   * child; its absence installs no ask-back tool.
+   */
+  askParent?: QuestionRecorder;
+  /**
+   * Announces a mid-run update the child sends with `notify_parent`. Supplied
+   * only for a background child whose operator left the channel on; its absence
+   * installs no update tool.
+   */
+  notifyParent?: UpdateAnnouncer;
+}
+
+/**
+ * The core's own child-facing tools, built for whichever callbacks this run
+ * supplied. An agent's `tools:` list is its complete capability allowlist, so
+ * these are appended to it rather than drawn from it: they are protocol the
+ * core installs in every child, and neither reaches the filesystem, the shell,
+ * or the network.
+ */
+function buildChildTools(params: CreateSubagentSessionParams): ToolDefinition[] {
+  const tools: ToolDefinition[] = [];
+  if (params.askParent) tools.push(new AskParentTool(params.askParent).toToolDefinition());
+  if (params.notifyParent)
+    tools.push(new NotifyParentTool(params.notifyParent).toToolDefinition());
+  return tools;
 }
 
 /**
@@ -165,8 +214,10 @@ export async function createSubagentSession(
     {
       cwd: snapshot.cwd,
       parentSystemPrompt: snapshot.systemPrompt,
+      parentPortablePrompt: snapshot.portablePrompt,
       parentModel: snapshot.model,
       modelRegistry: snapshot.modelRegistry,
+      resolvePromptInheritance: deps.resolvePromptInheritance,
     },
     {
       cwd: params.cwd,
@@ -210,6 +261,7 @@ export async function createSubagentSession(
   sessionManager.newSession({ parentSession: params.parentSession?.parentSessionId });
   const sessionId = sessionManager.getSessionId();
 
+  const childTools = buildChildTools(params);
   const { session } = await deps.io.createSession({
     cwd: cfg.effectiveCwd,
     agentDir,
@@ -217,7 +269,8 @@ export async function createSubagentSession(
     settingsManager: sessionSettings,
     modelRegistry: snapshot.modelRegistry,
     model: cfg.model,
-    tools: cfg.toolNames,
+    tools: [...cfg.toolNames, ...childTools.map((tool) => tool.name)],
+    customTools: childTools,
     excludeTools: EXCLUDED_TOOL_NAMES,
     resourceLoader: loader,
     thinkingLevel: cfg.thinkingLevel,
@@ -250,6 +303,11 @@ export async function createSubagentSession(
     await subagentSession.dispose();
     throw err;
   }
+
+  // Every child session_start handler has now run, so this is the first — and
+  // only — moment a parent can observe what the child's extensions installed.
+  // Deliberately outside the try above: a child whose binding threw never ran.
+  deps.lifecycle.bound({ sessionId, parentSessionId });
 
   return subagentSession;
 }

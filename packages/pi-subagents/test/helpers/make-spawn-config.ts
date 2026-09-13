@@ -1,4 +1,4 @@
-import type { ResolvedSpawnConfig } from "#src/tools/spawn-config";
+import { buildFallbackNote, type ResolvedSpawnConfig } from "#src/tools/spawn-config";
 
 /** Flat options for {@link createResolvedSpawnConfig}; only the scalars tests vary. */
 export interface ResolvedSpawnConfigOptions {
@@ -28,14 +28,12 @@ export function createResolvedSpawnConfig(
   const description = options.description ?? "task";
   const runInBackground = options.runInBackground ?? false;
   const modelName = options.model;
+  const rawType = options.rawType ?? subagentType;
+  const fellBack = options.fellBack ?? false;
 
   return {
-    identity: {
-      subagentType,
-      rawType: options.rawType ?? subagentType,
-      fellBack: options.fellBack ?? false,
-      displayName,
-    },
+    identity: { subagentType, rawType, fellBack, displayName },
+    notes: buildFallbackNote(rawType, fellBack),
     execution: {
       prompt: options.prompt ?? "do the task",
       description,
