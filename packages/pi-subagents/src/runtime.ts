@@ -83,10 +83,15 @@ export class SubagentRuntime {
   }
 
   /** Extract session identity from the current session context. */
-  getSessionInfo(): { parentSessionFile: string; parentSessionId: string } {
+  getSessionInfo(): {
+    parentSessionFile: string;
+    parentSessionId: string;
+    parentEntryId: string | null;
+  } {
     return {
       parentSessionFile: this.currentCtx?.sessionManager.getSessionFile() ?? "",
       parentSessionId: this.currentCtx?.sessionManager.getSessionId() ?? "",
+      parentEntryId: this.currentCtx?.sessionManager.getLeafId() ?? null,
     };
   }
 }

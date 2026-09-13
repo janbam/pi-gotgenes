@@ -48,6 +48,7 @@ export function createToolDeps(overrides: Partial<AgentToolFixture> = {}): Agent
 		getSessionInfo: vi.fn(() => ({
 			parentSessionFile: "/sessions/parent.jsonl",
 			parentSessionId: "session-1",
+			parentEntryId: null,
 		})),
 	};
 

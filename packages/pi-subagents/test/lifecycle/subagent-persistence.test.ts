@@ -3,7 +3,6 @@ import {
   loadSubagentRegistry,
   type PersistedSubagentRecord,
   SUBAGENT_REGISTRY_KEY,
-  type SubagentRegistrySession,
   saveSubagentRegistry,
 } from "#src/lifecycle/subagent-persistence";
 
@@ -53,10 +52,8 @@ function session(
   stored: unknown,
   branchIds: string[] = ["entry-1"],
  ) {
-  const setSessionState = vi.fn<SubagentRegistrySession["setSessionState"]>();
   return {
     getSessionState: <T>() => stored as T | undefined,
-    setSessionState,
     getBranch: vi.fn(() => branchIds.map((id) => ({ id }))),
   };
 }
@@ -66,6 +63,7 @@ describe("loadSubagentRegistry", () => {
     expect(loadSubagentRegistry(session(undefined))).toEqual({
       kind: "ready",
       records: [],
+      hiddenRecords: [],
     });
   });
 
@@ -82,7 +80,11 @@ describe("loadSubagentRegistry", () => {
       ]),
     );
 
-    expect(result).toEqual({ kind: "ready", records: [ancestor, current] });
+    expect(result).toEqual({
+      kind: "ready",
+      records: [ancestor, current],
+      hiddenRecords: [sibling],
+    });
   });
 
   it("keeps root-anchored records visible on every branch", () => {
@@ -90,7 +92,7 @@ describe("loadSubagentRegistry", () => {
 
     expect(
       loadSubagentRegistry(session({ version: 1, records: [root] }, [])),
-    ).toEqual({ kind: "ready", records: [root] });
+    ).toEqual({ kind: "ready", records: [root], hiddenRecords: [] });
   });
 
   it("hides every branch-anchored record from an unrelated empty lineage", () => {
@@ -99,6 +101,7 @@ describe("loadSubagentRegistry", () => {
     expect(loadSubagentRegistry(session(stored, []))).toEqual({
       kind: "ready",
       records: [],
+      hiddenRecords: stored.records,
     });
   });
 
@@ -125,12 +128,12 @@ describe("loadSubagentRegistry", () => {
 
 describe("saveSubagentRegistry", () => {
   it("writes one versioned custom JSON object under the extension key", () => {
-    const target = session(undefined);
+    const write = vi.fn();
     const records = [record()];
 
-    saveSubagentRegistry(target, records);
+    saveSubagentRegistry(write, records);
 
-    expect(target.setSessionState).toHaveBeenCalledWith(
+    expect(write).toHaveBeenCalledWith(
       SUBAGENT_REGISTRY_KEY,
       { version: 1, records },
     );

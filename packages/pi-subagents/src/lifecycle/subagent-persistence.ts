@@ -7,21 +7,13 @@
  * its source of truth.
  */
 
+import type { JsonValue } from "@earendil-works/pi-coding-agent";
 import type {
   SubagentStateSnapshot,
   SubagentStatus,
 } from "#src/lifecycle/subagent-state";
 import type { LifetimeUsage } from "#src/lifecycle/usage";
 import type { ThinkingLevel } from "#src/types";
-
-/** JSON values accepted by Pi's session-global state API. */
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | { [key: string]: JsonValue };
 
 /** Stable session-state namespace owned by this extension. */
 export const SUBAGENT_REGISTRY_KEY = "@gotgenes/pi-subagents";
@@ -57,6 +49,7 @@ export interface PersistedSubagentRecord {
   type: string;
   description: string;
   isBackground: boolean;
+  toolCallId?: string;
   /** Parent conversation leaf visible at spawn; null means the session root. */
   parentEntryId: string | null;
   state: PersistedSubagentState;
@@ -71,22 +64,33 @@ interface PersistedSubagentRegistry {
 
 /** Narrow parent-session storage and ancestry boundary used by the registry. */
 export interface SubagentRegistrySession {
-  getSessionState<T>(key: string): T | undefined;
-  setSessionState(key: string, value: JsonValue | undefined): void;
+  getSessionState<T extends JsonValue = JsonValue>(key: string): T | undefined;
   getBranch(): unknown[];
 }
 
+/** Write side supplied by `ExtensionAPI.setSessionState`. */
+export type SubagentRegistryWriter = (
+  key: string,
+  value: JsonValue | undefined,
+) => void;
+
 /** Result of decoding and ancestry-filtering the active parent registry. */
 export type SubagentRegistryLoad =
-  | { kind: "ready"; records: PersistedSubagentRecord[] }
+  | {
+      kind: "ready";
+      records: PersistedSubagentRecord[];
+      hiddenRecords: PersistedSubagentRecord[];
+    }
   | { kind: "incompatible"; reason: string };
 
 /** Decode the active parent registry and expose only records on its ancestry. */
 export function loadSubagentRegistry(
   session: SubagentRegistrySession,
 ): SubagentRegistryLoad {
-  const stored = session.getSessionState<unknown>(SUBAGENT_REGISTRY_KEY);
-  if (stored === undefined) return { kind: "ready", records: [] };
+  const stored = session.getSessionState(SUBAGENT_REGISTRY_KEY);
+  if (stored === undefined) {
+    return { kind: "ready", records: [], hiddenRecords: [] };
+  }
 
   // Reject unknown envelopes before inspecting records, so a newer writer is
   // never partially interpreted as this version's state.
@@ -123,25 +127,28 @@ export function loadSubagentRegistry(
         isObject(entry) && typeof entry.id === "string" ? [entry.id] : [],
       ),
   );
+  const visible = records.filter(
+    (candidate) =>
+      candidate.parentEntryId === null || ancestry.has(candidate.parentEntryId),
+  );
+  const visibleIds = new Set(visible.map((candidate) => candidate.id));
   return {
     kind: "ready",
-    records: records.filter(
-      (candidate) =>
-        candidate.parentEntryId === null || ancestry.has(candidate.parentEntryId),
-    ),
+    records: visible,
+    hiddenRecords: records.filter((candidate) => !visibleIds.has(candidate.id)),
   };
 }
 
 /** Replace the logical registry with one immediately durable versioned value. */
 export function saveSubagentRegistry(
-  session: SubagentRegistrySession,
+  write: SubagentRegistryWriter,
   records: readonly PersistedSubagentRecord[],
 ): void {
   const registry: PersistedSubagentRegistry = {
     version: REGISTRY_VERSION,
     records: [...records],
   };
-  session.setSessionState(SUBAGENT_REGISTRY_KEY, registry as unknown as JsonValue);
+  write(SUBAGENT_REGISTRY_KEY, registry as unknown as JsonValue);
 }
 
 /** True when a decoded JSON value is one complete current-version record. */
@@ -152,6 +159,7 @@ function isPersistedRecord(value: unknown): value is PersistedSubagentRecord {
     typeof value.type !== "string" ||
     typeof value.description !== "string" ||
     typeof value.isBackground !== "boolean" ||
+    !isOptionalString(value.toolCallId) ||
     !(value.parentEntryId === null || typeof value.parentEntryId === "string") ||
     !isPersistedState(value.state)
   ) {

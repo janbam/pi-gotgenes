@@ -28,7 +28,9 @@ function makeSessionCtx(overrides?: Partial<SessionContext>): SessionContext {
     sessionManager: {
       getSessionFile: () => "/sessions/test.jsonl",
       getSessionId: () => "test-session-id",
+      getLeafId: () => null,
       getBranch: () => [],
+      getSessionState: () => undefined,
     },
     ...overrides,
   };
@@ -165,13 +167,16 @@ describe("SubagentRuntime context query methods", () => {
       sessionManager: {
         getSessionFile: () => "/sessions/parent.jsonl",
         getSessionId: () => "session-42",
+        getLeafId: () => "entry-42",
         getBranch: () => [],
+        getSessionState: () => undefined,
       },
     });
     runtime.setSessionContext(ctx);
     const info = runtime.getSessionInfo();
     expect(info.parentSessionFile).toBe("/sessions/parent.jsonl");
     expect(info.parentSessionId).toBe("session-42");
+    expect(info.parentEntryId).toBe("entry-42");
   });
 
   it("getSessionInfo uses empty string when getSessionFile returns undefined", () => {
@@ -180,12 +185,15 @@ describe("SubagentRuntime context query methods", () => {
       sessionManager: {
         getSessionFile: () => undefined,
         getSessionId: () => "session-99",
+        getLeafId: () => null,
         getBranch: () => [],
+        getSessionState: () => undefined,
       },
     });
     runtime.setSessionContext(ctx);
     const info = runtime.getSessionInfo();
     expect(info.parentSessionFile).toBe("");
     expect(info.parentSessionId).toBe("session-99");
+    expect(info.parentEntryId).toBeNull();
   });
 });

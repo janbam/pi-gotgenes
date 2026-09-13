@@ -11,15 +11,32 @@ import type { Model } from "@earendil-works/pi-ai";
 import { type BackgroundRequest, resolveBackgroundMode } from "#src/config/invocation-config";
 import { debugLog } from "#src/debug";
 import type { ConcurrencyLimiter } from "#src/lifecycle/concurrency-limiter";
-import type { CreateSubagentSessionParams } from "#src/lifecycle/create-subagent-session";
+import type {
+  CreateSubagentSessionParams,
+  RestoreSubagentSessionParams,
+} from "#src/lifecycle/create-subagent-session";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
 import { type ResumeRefusal, Subagent, type SubagentLifecycleObserver } from "#src/lifecycle/subagent";
+import {
+  loadSubagentRegistry,
+  type PersistedSubagentRecord,
+  type SubagentRegistrySession,
+  type SubagentRegistryWriter,
+  saveSubagentRegistry,
+} from "#src/lifecycle/subagent-persistence";
 import type { SubagentSession } from "#src/lifecycle/subagent-session";
 import { SubagentState } from "#src/lifecycle/subagent-state";
 import type { WorkspaceProvider } from "#src/lifecycle/workspace";
 
 import type { RunConfig } from "#src/runtime";
-import type { AgentConfig, CompactionInfo, ParentSessionInfo, SubagentType, ThinkingLevel } from "#src/types";
+import type {
+  AgentConfig,
+  CompactionInfo,
+  ParentSessionInfo,
+  SessionContext,
+  SubagentType,
+  ThinkingLevel,
+} from "#src/types";
 
 /**
  * The agent-registry slice the manager needs to resolve a spawn. Deliberately
@@ -160,6 +177,10 @@ export interface SubagentManagerObserver {
 export interface SubagentManagerOptions {
   /** Assembly factory that produces a born-complete SubagentSession per spawn. */
   createSubagentSession: (params: CreateSubagentSessionParams) => Promise<SubagentSession>;
+  /** Reopens a child JSONL after its live SDK session was released. */
+  restoreSubagentSession?: (
+    params: RestoreSubagentSessionParams,
+  ) => Promise<SubagentSession>;
   /** Concurrency limiter — schedules background run thunks FIFO against the limit. */
   limiter: ConcurrencyLimiter;
   /** Base working directory handed to a workspace provider (the parent cwd). */
@@ -170,6 +191,8 @@ export interface SubagentManagerOptions {
   observer?: SubagentManagerObserver;
   /** Agent registry, consulted to canonicalize a spawn's type and resolve its config. */
   registry: SpawnTypeResolver;
+  /** Session-global writer from the extension API for the currently active parent. */
+  writeSessionState?: SubagentRegistryWriter;
 }
 
 export interface AgentSpawnConfig {
@@ -203,12 +226,19 @@ export class SubagentManager {
   private sweepInterval: ReturnType<typeof setInterval>;
   private readonly observer?: SubagentManagerObserver;
   private readonly createSubagentSession: (params: CreateSubagentSessionParams) => Promise<SubagentSession>;
+  private readonly restoreSubagentSession?: (
+    params: RestoreSubagentSessionParams,
+  ) => Promise<SubagentSession>;
   private readonly limiter: ConcurrencyLimiter;
   private readonly baseCwd: string;
   private getRunConfig?: () => RunConfig;
   private getRetentionPolicy?: () => RetentionPolicy;
   private readonly registry: SpawnTypeResolver;
+  private readonly writeSessionState?: SubagentRegistryWriter;
   private _workspaceProvider?: WorkspaceProvider;
+  private activeSession?: SubagentRegistrySession;
+  private hiddenRecords: PersistedSubagentRecord[] = [];
+  private registryIncompatibility?: string;
 
   /** The registered workspace provider, or undefined when none is registered. */
   get workspaceProvider(): WorkspaceProvider | undefined {
@@ -217,12 +247,14 @@ export class SubagentManager {
 
   constructor(options: SubagentManagerOptions) {
     this.createSubagentSession = options.createSubagentSession;
+    this.restoreSubagentSession = options.restoreSubagentSession;
     this.limiter = options.limiter;
     this.baseCwd = options.baseCwd;
     this.observer = options.observer;
     this.getRunConfig = options.getRunConfig;
     this.getRetentionPolicy = options.getRetentionPolicy;
     this.registry = options.registry;
+    this.writeSessionState = options.writeSessionState;
     // Periodically release the heavy session of terminal agents past their
     // retention window. The lightweight record (with its result) is kept for the
     // session lifetime, so get_subagent_result never misses in-session.
@@ -248,14 +280,16 @@ export class SubagentManager {
   }
 
   /** Compose a per-agent lifecycle observer from manager and spawn-config concerns. */
-  private buildObserver(options: AgentSpawnConfig): SubagentLifecycleObserver {
+  private buildObserver(spawnObserver?: SubagentLifecycleObserver): SubagentLifecycleObserver {
     return {
       onStarted: (agent) => {
         this.observer?.onSubagentStarted(agent);
+        this.persistRegistry();
       },
-      onSessionCreated: options.observer?.onSessionCreated
-        ? (agent) => options.observer!.onSessionCreated!(agent)
-        : undefined,
+      onSessionCreated: (agent) => {
+        spawnObserver?.onSessionCreated?.(agent);
+        this.persistRegistry();
+      },
       // Terminal transitions are reported for every agent. Whether the parent
       // needs telling is the notification layer's decision, made from the
       // carrier claim; suppressing the observer here would also suppress the
@@ -263,23 +297,119 @@ export class SubagentManager {
       // the run rather than announcements.
       onRunFinished: (agent) => {
         try { this.observer?.onSubagentCompleted(agent); } catch (err) { debugLog("onSubagentCompleted observer", err); }
+        this.persistRegistry();
       },
       onResumeStarted: (agent) => {
         try { this.observer?.onSubagentResuming(agent); } catch (err) { debugLog("onSubagentResuming observer", err); }
+        this.persistRegistry();
       },
       onResumeFinished: (agent) => {
         try { this.observer?.onSubagentResumed(agent); } catch (err) { debugLog("onSubagentResumed observer", err); }
+        this.persistRegistry();
       },
       onUpdateSent: (agent, message) => {
         this.observer?.onSubagentUpdate?.(agent, message);
+        this.persistRegistry();
       },
       onWorkspaceNotice: (agent, notice) => {
         this.observer?.onSubagentWorkspaceNotice?.(agent, notice);
+        this.persistRegistry();
       },
       onCompacted: (agent, info) => {
         this.observer?.onSubagentCompacted(agent, info);
+        this.persistRegistry();
+      },
+      onStateChanged: () => {
+        this.persistRegistry();
       },
     };
+  }
+
+  /** Activate the registry belonging to the selected parent session. */
+  activate(ctx: SessionContext): void {
+    if (this.agents.size > 0 || this.activeSession) {
+      throw new Error("Cannot activate a parent session before deactivating the current one");
+    }
+    this.activeSession = ctx.sessionManager;
+    const loaded = loadSubagentRegistry(ctx.sessionManager);
+    if (loaded.kind === "incompatible") {
+      this.registryIncompatibility = loaded.reason;
+      return;
+    }
+
+    this.registryIncompatibility = undefined;
+    this.hiddenRecords = loaded.hiddenRecords;
+    const snapshot: ParentSnapshot = {
+      cwd: ctx.cwd,
+      systemPrompt: ctx.getSystemPrompt(),
+      model: ctx.model,
+      modelRegistry: ctx.modelRegistry,
+    };
+    const parentSession: ParentSessionInfo = {
+      parentSessionFile: ctx.sessionManager.getSessionFile(),
+      parentSessionId: ctx.sessionManager.getSessionId(),
+    };
+
+    // Hydrate lightweight records only. The child SDK session is reopened on
+    // demand, keeping activation bounded even for a long parent history.
+    for (const persisted of loaded.records) {
+      const record = new Subagent({
+        id: persisted.id,
+        type: persisted.type,
+        description: persisted.description,
+        isBackground: persisted.isBackground,
+        parentEntryId: persisted.parentEntryId,
+        resumeSpec: persisted.session,
+        state: SubagentState.restore(persisted.state),
+        execution: {
+          createSubagentSession: this.createSubagentSession,
+          restoreSubagentSession: this.restoreSubagentSession,
+          snapshot,
+          prompt: "",
+          baseCwd: this.baseCwd,
+          observer: this.buildObserver(),
+          getRunConfig: this.getRunConfig,
+          getWorkspaceProvider: () => this._workspaceProvider,
+          parentSession: { ...parentSession, toolCallId: persisted.toolCallId },
+        },
+      });
+      this.agents.set(record.id, record);
+    }
+    this.persistRegistry();
+  }
+
+  /** Persist and release the outgoing parent view without deleting durable records. */
+  async deactivate(): Promise<void> {
+    if (!this.activeSession) return;
+
+    // Stop process-local work before another parent becomes active, then wait
+    // until child JSONL writes and terminal observers have settled.
+    this.abortAll();
+    this.persistRegistry();
+    await this.waitForAll();
+    this.persistRegistry();
+
+    const releases = [...this.agents.values()].map((record) =>
+      record.releaseSession(),
+    );
+    await Promise.allSettled(releases);
+    this.persistRegistry();
+
+    this.agents.clear();
+    this.hiddenRecords = [];
+    this.activeSession = undefined;
+    this.registryIncompatibility = undefined;
+  }
+
+  /** Write active and hidden branch records as one session-global registry. */
+  private persistRegistry(): void {
+    if (!this.activeSession || !this.writeSessionState || this.registryIncompatibility) {
+      return;
+    }
+    saveSubagentRegistry(this.writeSessionState, [
+      ...this.hiddenRecords,
+      ...[...this.agents.values()].map((record) => record.toPersistedRecord()),
+    ]);
   }
 
   /**
@@ -353,6 +483,7 @@ export class SubagentManager {
       type,
       description: options.description,
       isBackground,
+      parentEntryId: options.parentSession?.parentEntryId,
       state: new SubagentState({
         status: isBackground ? "queued" : "running",
         startedAt: Date.now(),
@@ -362,7 +493,7 @@ export class SubagentManager {
         snapshot,
         prompt,
         baseCwd: this.baseCwd,
-        observer: this.buildObserver(options),
+        observer: this.buildObserver(options.observer),
         getRunConfig: this.getRunConfig,
         getWorkspaceProvider: () => this._workspaceProvider,
         model: options.model,
@@ -373,6 +504,12 @@ export class SubagentManager {
       },
     });
     this.agents.set(id, record);
+    try {
+      this.persistRegistry();
+    } catch (err) {
+      this.agents.delete(id);
+      throw err;
+    }
 
     if (isBackground) {
       this.observer?.onSubagentCreated(record);
@@ -399,10 +536,15 @@ export class SubagentManager {
    * subscription lifecycle.
    */
   async resume(id: string, prompt: string, options: ResumeCallOptions = {}): Promise<ResumeOutcome> {
+    if (this.registryIncompatibility) {
+      return { kind: "refused", reason: "incompatible" };
+    }
     const agent = this.agents.get(id);
     if (!agent) return { kind: "refused", reason: "unknown-agent" };
     const refusal = agent.resumeRefusal;
     if (refusal) return { kind: "refused", reason: refusal };
+    const restoreRefusal = await agent.prepareResume();
+    if (restoreRefusal) return { kind: "refused", reason: restoreRefusal };
     // Before the resume starts: resetForResume runs synchronously inside
     // resume(), so a claim taken afterwards would miss the terminal edge.
     if (options.claimOutcome) agent.claim();
@@ -442,6 +584,7 @@ export class SubagentManager {
    */
   private removeRecord(id: string, record: Subagent): Promise<void> {
     this.agents.delete(id);
+    this.persistRegistry();
     return record.disposeSession();
   }
 
@@ -465,8 +608,8 @@ export class SubagentManager {
   }
 
   /**
-   * Remove all completed/stopped/errored records immediately.
-   * Called on session start/switch so tasks from a prior session don't persist.
+   * Explicitly delete every completed/stopped/errored record in the active lineage.
+   * Session navigation uses deactivate(), which preserves these durable records.
    */
   async clearCompleted(): Promise<void> {
     const teardowns: Promise<void>[] = [];

@@ -1,14 +1,22 @@
+import type { JsonValue } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { AgentTypeRegistry } from "#src/config/agent-types";
 import { ConcurrencyLimiter } from "#src/lifecycle/concurrency-limiter";
-import type { CreateSubagentSessionParams } from "#src/lifecycle/create-subagent-session";
+import type {
+  CreateSubagentSessionParams,
+  RestoreSubagentSessionParams,
+} from "#src/lifecycle/create-subagent-session";
 import type { AgentSpawnConfig } from "#src/lifecycle/subagent-manager";
 import { resolveRetentionWindow, SubagentManager, type SubagentManagerObserver } from "#src/lifecycle/subagent-manager";
+import type {
+  PersistedSubagentRecord,
+  SubagentRegistryWriter,
+} from "#src/lifecycle/subagent-persistence";
 import type { SubagentSession } from "#src/lifecycle/subagent-session";
 import type { WorkspaceProvider } from "#src/lifecycle/workspace";
 import { NotificationManager } from "#src/observation/notification";
 import type { RunConfig } from "#src/runtime";
-import type { AgentConfig, Subagent } from "#src/types";
+import type { AgentConfig, SessionContext, Subagent } from "#src/types";
 import { makeWorkspace, makeWorkspaceProvider } from "#test/helpers/make-workspace";
 import { createBlockingFactory, createSessionFactory } from "#test/helpers/manager-stubs";
 import { createMockSession, createSubagentSessionStub, emitResumeUsageAndCompaction, toSubagentSession } from "#test/helpers/mock-session";
@@ -18,6 +26,9 @@ import { STUB_SNAPSHOT } from "#test/helpers/stub-ctx";
 const DEFAULT_MAX_CONCURRENT = 4;
 
 type SessionFactory = (params: CreateSubagentSessionParams) => Promise<SubagentSession>;
+type RestoreFactory = (
+  params: RestoreSubagentSessionParams,
+) => Promise<SubagentSession>;
 
 /** Default factory: resolves to a fresh SubagentSession stub on every spawn. */
 function defaultFactory(): SessionFactory {
@@ -50,12 +61,14 @@ function registryWith(name: string, overrides: Partial<AgentConfig>): AgentTypeR
 /** Test helper: construct an SubagentManager with injected stubs. */
 function createManager(overrides?: {
   createSubagentSession?: SessionFactory;
+  restoreSubagentSession?: RestoreFactory;
   observer?: Partial<SubagentManagerObserver>;
   getMaxConcurrent?: () => number;
   getRunConfig?: () => RunConfig;
   getRetentionPolicy?: () => { consumedSessionRetentionMinutes: number; unconsumedSessionRetentionMinutes: number };
   baseCwd?: string;
   registry?: AgentTypeRegistry;
+  writeSessionState?: SubagentRegistryWriter;
 }) {
   const createSubagentSession: SessionFactory = overrides?.createSubagentSession ?? defaultFactory();
   const observer: SubagentManagerObserver | undefined = overrides?.observer
@@ -72,14 +85,74 @@ function createManager(overrides?: {
   const limiter = new ConcurrencyLimiter(overrides?.getMaxConcurrent ?? (() => DEFAULT_MAX_CONCURRENT));
   const mgr = new SubagentManager({
     createSubagentSession,
+    restoreSubagentSession: overrides?.restoreSubagentSession,
     observer,
     limiter,
     baseCwd: overrides?.baseCwd ?? "/repo",
     getRunConfig: overrides?.getRunConfig,
     getRetentionPolicy: overrides?.getRetentionPolicy,
     registry: overrides?.registry ?? defaultRegistry(),
+    writeSessionState: overrides?.writeSessionState,
   });
   return { manager: mgr, createSubagentSession, limiter };
+}
+
+/** Mutable Pi session-state boundary used to simulate switch/reopen activation. */
+function parentState(
+  initial?: unknown,
+  branchIds: string[] = ["entry-1"],
+) {
+  let stored = initial;
+  const writeSessionState = vi.fn<SubagentRegistryWriter>((_key, value) => {
+    stored = value;
+  });
+  const ctx: SessionContext = {
+    cwd: "/repo",
+    model: undefined,
+    modelRegistry: { find: () => undefined, getAll: () => [] },
+    getSystemPrompt: () => "parent prompt",
+    sessionManager: {
+      getSessionFile: () => "/sessions/parent.jsonl",
+      getSessionId: () => "parent-session",
+      getLeafId: () => branchIds.at(-1) ?? null,
+      getBranch: () => branchIds.map((id) => ({ id })),
+      getSessionState: <T extends JsonValue>() => stored as T | undefined,
+    },
+  };
+  return { ctx, writeSessionState, read: () => stored };
+}
+
+/** One settled durable record for activation and branch-isolation tests. */
+function persistedRecord(
+  id: string,
+  parentEntryId: string | null,
+): PersistedSubagentRecord {
+  return {
+    id,
+    type: "Explore",
+    description: `record ${id}`,
+    isBackground: true,
+    parentEntryId,
+    state: {
+      status: "completed",
+      result: "done",
+      startedAt: 100,
+      completedAt: 200,
+      toolUses: 0,
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      compactionCount: 0,
+      turnCount: 1,
+      responseText: "done",
+    },
+    session: {
+      outputFile: `/tasks/${id}.jsonl`,
+      sessionId: `session-${id}`,
+      sessionDir: "/tasks",
+      effectiveCwd: "/repo",
+      systemPrompt: "Explore",
+      toolNames: ["read"],
+    },
+  };
 }
 
 /** Spawn a background agent using STUB_SNAPSHOT. */
@@ -154,6 +227,118 @@ function seedForegroundNotificationScenario() {
 }
 
 describe("SubagentManager", () => {
+  describe("durable parent registry", () => {
+    let managers: SubagentManager[] = [];
+
+    afterEach(async () => {
+      await Promise.all(managers.map((manager) => manager.dispose()));
+      managers = [];
+    });
+
+    it("hydrates only active-ancestry records while preserving hidden siblings", () => {
+      const visible = persistedRecord("visible", "entry-1");
+      const hidden = persistedRecord("hidden", "sibling-entry");
+      const parent = parentState(
+        { version: 1, records: [visible, hidden] },
+        ["entry-1", "entry-2"],
+      );
+      const { manager } = createManager({
+        writeSessionState: parent.writeSessionState,
+      });
+      managers.push(manager);
+
+      manager.activate(parent.ctx);
+
+      expect(manager.listAgents().map((record) => record.id)).toEqual(["visible"]);
+      expect(parent.writeSessionState).toHaveBeenLastCalledWith(
+        "@gotgenes/pi-subagents",
+        expect.objectContaining({ records: [hidden, expect.objectContaining({ id: "visible" })] }),
+      );
+    });
+
+    it("reopens and resumes the same ID after parent deactivation and activation", async () => {
+      const parent = parentState();
+      const fresh = createSessionFactory(createMockSession(), "/tasks/agent.jsonl");
+      const first = createManager({
+        createSubagentSession: fresh.factory,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(first);
+      first.activate(parent.ctx);
+      const id = first.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "durable child",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: {
+          parentSessionFile: "/sessions/parent.jsonl",
+          parentSessionId: "parent-session",
+          parentEntryId: "entry-1",
+        },
+      });
+      await first.getRecord(id)!.promise;
+      await first.deactivate();
+
+      const reopened = createSubagentSessionStub(
+        createMockSession(),
+        "/tasks/agent.jsonl",
+      );
+      reopened.resumeTurnLoop.mockResolvedValue("continued after reopen");
+      const restoreSubagentSession = vi.fn<RestoreFactory>(async () =>
+        toSubagentSession(reopened),
+      );
+      const second = createManager({
+        restoreSubagentSession,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(second);
+
+      second.activate(parent.ctx);
+      const hydrated = second.getRecord(id)!;
+      expect(hydrated.id).toBe(id);
+      expect(hydrated.isSessionReady()).toBe(false);
+
+      const outcome = await second.resume(id, "continue");
+
+      expect(outcome).toEqual({ kind: "resumed", record: hydrated });
+      expect(restoreSubagentSession).toHaveBeenCalledOnce();
+      expect(reopened.resumeTurnLoop).toHaveBeenCalledWith(
+        "continue",
+        undefined,
+      );
+      expect(hydrated.result).toBe("continued after reopen");
+    });
+
+    it("does not expose a durable ID to an unrelated parent session", () => {
+      const origin = parentState({
+        version: 1,
+        records: [persistedRecord("origin-agent", "entry-1")],
+      });
+      const unrelated = parentState(undefined, ["unrelated-entry"]);
+      const { manager } = createManager({
+        writeSessionState: unrelated.writeSessionState,
+      });
+      managers.push(manager);
+
+      manager.activate(unrelated.ctx);
+
+      expect(manager.getRecord("origin-agent")).toBeUndefined();
+      expect(origin.read()).toBeDefined();
+    });
+
+    it("returns a stable incompatibility when the active registry schema is unsupported", async () => {
+      const parent = parentState({ version: 99, records: [] });
+      const { manager } = createManager({
+        writeSessionState: parent.writeSessionState,
+      });
+      managers.push(manager);
+      manager.activate(parent.ctx);
+
+      await expect(manager.resume("agent-1", "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "incompatible",
+      });
+    });
+  });
+
   describe("spawn", () => {
     let manager: SubagentManager;
 

@@ -11,7 +11,9 @@ function makeCtx(entries: unknown[]): SessionContext {
     sessionManager: {
       getSessionFile: () => undefined,
       getSessionId: () => "test",
+      getLeafId: () => null,
       getBranch: () => entries,
+      getSessionState: () => undefined,
     },
   };
 }

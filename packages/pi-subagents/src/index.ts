@@ -27,7 +27,11 @@ import { loadCustomAgents } from "#src/config/custom-agents";
 import { InterruptHandler, SessionLifecycleHandler, WidgetEventsHandler } from "#src/handlers/index";
 import { createChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import { ConcurrencyLimiter } from "#src/lifecycle/concurrency-limiter";
-import { createSubagentSession, type SubagentSessionDeps } from "#src/lifecycle/create-subagent-session";
+import {
+  createSubagentSession,
+  restoreSubagentSession,
+  type SubagentSessionDeps,
+} from "#src/lifecycle/create-subagent-session";
 import { SubagentManager } from "#src/lifecycle/subagent-manager";
 import { CompositeSubagentObserver } from "#src/observation/composite-subagent-observer";
 import {
@@ -184,12 +188,15 @@ export default function (pi: ExtensionAPI) {
 
   const manager = new SubagentManager({
     createSubagentSession: (params) => createSubagentSession(params, subagentSessionDeps),
+    restoreSubagentSession: (params) =>
+      restoreSubagentSession(params, subagentSessionDeps),
     baseCwd: process.cwd(),
     observer,
     limiter,
     getRunConfig: () => settings,
     getRetentionPolicy: () => settings,
     registry,
+    writeSessionState: (key, value) => pi.setSessionState(key, value),
   });
 
   // Typed service published via Symbol.for() for cross-extension access.

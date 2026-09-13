@@ -176,7 +176,9 @@ function makeStubCtx(): SessionContext {
     sessionManager: {
       getSessionFile: () => undefined,
       getSessionId: () => "stub-session",
+      getLeafId: () => null,
       getBranch: () => [],
+      getSessionState: () => undefined,
     },
   };
 }
