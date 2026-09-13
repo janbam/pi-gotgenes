@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { AgentTool } from "#src/tools/agent-tool";
 import { createToolDeps, createToolDepsWithDisabledBuiltInAgents } from "#test/helpers/make-deps";
+import { makeModel } from "#test/helpers/make-model";
 import { createTestSubagent } from "#test/helpers/make-subagent";
 import { createMockSession, createSubagentSessionStub, toSubagentSession } from "#test/helpers/mock-session";
 
@@ -156,6 +157,25 @@ describe("AgentTool — resume path", () => {
 		expect(result.content[0].text).toContain("Resumed output.");
 	});
 
+	it("does not apply new-session reasoning validation to an existing session", async () => {
+		const deps = createToolDeps();
+		const resumeRecord = createTestSubagent();
+		resumeRecord.subagentSession = toSubagentSession(createSubagentSessionStub(createMockSession()));
+		deps.manager.getRecord = vi.fn().mockReturnValue(resumeRecord);
+		deps.manager.resume = vi.fn().mockResolvedValue(createTestSubagent({ result: "Resumed output." }));
+
+		const result = await execute(deps, {
+			prompt: "continue",
+			description: "resume",
+			subagent_type: "general-purpose",
+			resume: "agent-1",
+			thinking: "high",
+		});
+
+		expect(result.content[0].text).toContain("Resumed output.");
+		expect(deps.manager.resume).toHaveBeenCalledWith("agent-1", "continue", expect.any(AbortSignal));
+	});
+
 	it("marks the resumed record consumed (resume-return delivery edge)", async () => {
 		const deps = createToolDeps();
 		const resumeRecord = createTestSubagent();
@@ -174,19 +194,55 @@ describe("AgentTool — resume path", () => {
 });
 
 describe("AgentTool — model resolution error", () => {
-	it("returns error when model resolution fails", async () => {
+	it("throws the model-resolution reason so Pi can expose it as a tool error", async () => {
 		const deps = createToolDeps();
-		const result = await execute(
-			deps,
-			{
+		const availableModel = makeModel({ id: "claude-sonnet", name: "Claude Sonnet" });
+		deps.runtime.getModelInfo = vi.fn(() => ({
+			parentModel: availableModel,
+			modelRegistry: {
+				find: () => undefined,
+				getAll: () => [availableModel],
+				getAvailable: () => [availableModel],
+			},
+		}));
+
+		await expect(
+			execute(deps, {
 				prompt: "test",
 				description: "test",
 				subagent_type: "general-purpose",
 				model: "nonexistent-model-xyz",
-			},
+			}),
+		).rejects.toEqual(
+			new Error(
+				'Model not found: "nonexistent-model-xyz".\n\nAvailable models:\n  anthropic/claude-sonnet',
+			),
 		);
-		// User-specified model that doesn't resolve → error message
-		expect(result.content[0].text).toContain("nonexistent-model-xyz");
+	});
+
+	it("throws when the requested reasoning level is unavailable for the resolved model", async () => {
+		const deps = createToolDeps();
+		const model = makeModel({ id: "gpt-4o", name: "GPT-4o", provider: "openai", reasoning: false });
+		deps.runtime.getModelInfo = vi.fn(() => ({
+			parentModel: model,
+			modelRegistry: {
+				find: (provider: string, modelId: string) => provider === model.provider && modelId === model.id ? model : undefined,
+				getAll: () => [model],
+				getAvailable: () => [model],
+			},
+		}));
+
+		await expect(
+			execute(deps, {
+				prompt: "test",
+				description: "test",
+				subagent_type: "general-purpose",
+				model: "openai/gpt-4o",
+				thinking: "high",
+			}),
+		).rejects.toThrow(
+			'Reasoning level "high" is not available for model "openai/gpt-4o". Available reasoning levels: off.',
+		);
 	});
 });
 
