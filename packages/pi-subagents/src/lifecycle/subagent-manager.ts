@@ -250,7 +250,6 @@ export class SubagentManager {
   private tombstones = new Map<string, PersistedSubagentTombstone>();
   private hiddenTombstones: PersistedSubagentTombstone[] = [];
   private registryIncompatibility?: string;
-  /** True only while the old branch's departing records are being drained. */
   /** Closes spawn/resume admission while the active parent projection is changing. */
   private parentTransitioning = false;
   /** Records settling after leaf commit whose effects must not reach the selected sibling. */
@@ -365,16 +364,21 @@ export class SubagentManager {
   /** Enforce lineage directly from Pi's live branch, before lifecycle projection catches up. */
   private isRecordVisible(record: Subagent): boolean {
     if (this.agents.get(record.id) !== record) return false;
+    return this.isParentEntryVisible(record.parentEntryId);
+  }
+
+  /** Resolve branch ownership from Pi's live ancestry, not the projected registry cache. */
+  private isParentEntryVisible(parentEntryId: string | null): boolean {
     // A manager can run without parent persistence in headless/API use. With no
     // active session there is no competing lineage to filter against.
     if (!this.activeSession) return true;
-    if (record.parentEntryId === null) return true;
+    if (parentEntryId === null) return true;
     return this.activeSession.getBranch().some(
       (entry) =>
         typeof entry === "object" &&
         entry !== null &&
         "id" in entry &&
-        entry.id === record.parentEntryId,
+        entry.id === parentEntryId,
     );
   }
 
@@ -803,7 +807,8 @@ export class SubagentManager {
     if (this.registryIncompatibility) {
       return { kind: "refused", reason: "incompatible" };
     }
-    if (this.tombstones.has(id)) {
+    const tombstone = this.tombstones.get(id);
+    if (tombstone && this.isParentEntryVisible(tombstone.parentEntryId)) {
       return { kind: "refused", reason: "deleted" };
     }
     const agent = this.getRecord(id);

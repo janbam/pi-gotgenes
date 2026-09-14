@@ -502,6 +502,48 @@ describe("SubagentManager", () => {
       });
     });
 
+    it("hides a sibling tombstone immediately and restores its deletion reason on return", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const tombstone = {
+        id: "deleted-agent",
+        parentEntryId: "old-entry",
+        reason: "deleted" as const,
+        deletedAt: 300,
+      };
+      const parent = parentState(
+        { version: 1, records: [], tombstones: [tombstone] },
+        branchIds,
+      );
+      const manager = createManager({
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+      await expect(manager.resume(tombstone.id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+
+      // Pi commits the leaf before session_tree handlers finish. The old
+      // sibling's durable deletion marker must disappear at that live boundary.
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await expect(manager.resume(tombstone.id, "probe")).resolves.toEqual({
+        kind: "refused",
+        reason: "unknown-agent",
+      });
+      await manager.reconcileTree(parent.ctx);
+      expect(JSON.stringify(parent.read())).toContain(tombstone.id);
+
+      // Re-entering the owning lineage reprojects the preserved marker and
+      // recovers the stable actionable reason for the same ID.
+      branchIds.splice(0, branchIds.length, "shared-entry", "old-entry");
+      await manager.reconcileTree(parent.ctx);
+      await expect(manager.resume(tombstone.id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+    });
+
     it("waits for in-flight session creation before clearing a deactivated registry", async () => {
       const parent = parentState();
       const sessionGate = Promise.withResolvers<SubagentSession>();

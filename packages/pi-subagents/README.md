@@ -356,7 +356,7 @@ A resume that could not start resolves to `{ kind: "refused", reason }` instead 
 | -------------------- | ------------------------------------------------------------------------ |
 | `unknown-agent`      | No record or tombstone with that ID belongs to the active parent lineage |
 | `deleted`            | That lineage explicitly deleted the durable handle                       |
-| `parent-transition`  | Tree preparation is settling old-lineage work; retry after it finishes   |
+| `parent-transition`  | Parent navigation or restoration is crossing lineages; retry afterward   |
 | `still-running`      | The agent has not settled; wait, or `steer` it while it runs             |
 | `no-session`         | The agent never had a session to continue                                |
 | `session-released`   | Its live session was released without a persisted transcript             |
