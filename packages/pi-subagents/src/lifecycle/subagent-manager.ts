@@ -360,6 +360,7 @@ export class SubagentManager {
         isBackground: persisted.isBackground,
         parentEntryId: persisted.parentEntryId,
         resumeSpec: persisted.session,
+        workspace: persisted.workspace,
         state: SubagentState.restore(persisted.state),
         execution: {
           createSubagentSession: this.createSubagentSession,
@@ -542,7 +543,9 @@ export class SubagentManager {
     const agent = this.agents.get(id);
     if (!agent) return { kind: "refused", reason: "unknown-agent" };
     const refusal = agent.resumeRefusal;
-    if (refusal) return { kind: "refused", reason: refusal };
+    if (refusal && refusal !== "unavailable" && refusal !== "incompatible") {
+      return { kind: "refused", reason: refusal };
+    }
     const restoreRefusal = await agent.prepareResume();
     if (restoreRefusal) return { kind: "refused", reason: restoreRefusal };
     // Before the resume starts: resetForResume runs synchronously inside

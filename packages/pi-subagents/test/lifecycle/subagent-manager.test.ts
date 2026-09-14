@@ -307,6 +307,89 @@ describe("SubagentManager", () => {
       expect(hydrated.result).toBe("continued after reopen");
     });
 
+    it("restores the persisted workspace before reopening the child session", async () => {
+      const parent = parentState();
+      const liveWorkspace = makeWorkspace("/ws/agent", undefined, {
+        state: { path: "/ws/agent", revision: "abc123" },
+      });
+      const first = createManager({
+        createSubagentSession: createSessionFactory(
+          createMockSession(),
+          "/tasks/workspace-agent.jsonl",
+        ).factory,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(first);
+      first.registerWorkspaceProvider(makeWorkspaceProvider(liveWorkspace));
+      first.activate(parent.ctx);
+      const id = first.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "workspace child",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "entry-1" },
+      });
+      await first.getRecord(id)!.promise;
+      await first.deactivate();
+
+      const order: string[] = [];
+      const restoredWorkspace = makeWorkspace("/ws/agent");
+      const provider = makeWorkspaceProvider(undefined, restoredWorkspace);
+      provider.restore.mockImplementation(async () => {
+        order.push("workspace");
+        return restoredWorkspace;
+      });
+      const reopened = createSubagentSessionStub(
+        createMockSession(),
+        "/tasks/workspace-agent.jsonl",
+      );
+      const restoreSubagentSession = vi.fn<RestoreFactory>(async () => {
+        order.push("session");
+        return toSubagentSession(reopened);
+      });
+      const second = createManager({
+        restoreSubagentSession,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(second);
+      second.registerWorkspaceProvider(provider);
+      second.activate(parent.ctx);
+
+      await second.resume(id, "continue");
+
+      expect(order).toEqual(["workspace", "session"]);
+      expect(provider.restore).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: id }),
+        { path: "/ws/agent", revision: "abc123" },
+      );
+    });
+
+    it("allows the same ID to retry after its required workspace provider is restored", async () => {
+      const persisted = persistedRecord("workspace-agent", "entry-1");
+      persisted.workspace = {
+        providerId: "test-workspace",
+        state: { path: "/ws/agent", revision: "abc123" },
+      };
+      const parent = parentState({ version: 1, records: [persisted] });
+      const reopened = createSubagentSessionStub();
+      const manager = createManager({
+        restoreSubagentSession: vi.fn(async () => toSubagentSession(reopened)),
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+
+      await expect(manager.resume(persisted.id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "incompatible",
+      });
+
+      manager.registerWorkspaceProvider(
+        makeWorkspaceProvider(undefined, makeWorkspace("/ws/agent")),
+      );
+      await expect(manager.resume(persisted.id, "continue")).resolves.toMatchObject({
+        kind: "resumed",
+      });
+    });
+
     it("does not expose a durable ID to an unrelated parent session", () => {
       const origin = parentState({
         version: 1,
@@ -1518,7 +1601,13 @@ describe("SubagentManager", () => {
     });
 
     function makeProvider(): WorkspaceProvider {
-      return { prepare: vi.fn(async () => undefined) };
+      return {
+        id: "test-workspace",
+        prepare: vi.fn(async () => undefined),
+        restore: vi.fn(async () => {
+          throw new Error("workspace unavailable");
+        }),
+      };
     }
 
     it("returns a disposer and exposes the registered provider via getter", () => {
@@ -1553,7 +1642,7 @@ describe("SubagentManager", () => {
       expect(manager.workspaceProvider).toBe(second);
     });
 
-    it("relays a held workspace's notice to the manager observer when the session is released", async () => {
+    it("does not repeat a terminal workspace checkpoint notice when the session is released", async () => {
       const onSubagentWorkspaceNotice = vi.fn<(record: Subagent, notice: string) => void>();
       const notice = "\n\n---\nChanges saved to branch `pi-agent-1`.";
       const stub = createSubagentSessionStub();
@@ -1570,10 +1659,19 @@ describe("SubagentManager", () => {
         observer: { onSubagentWorkspaceNotice },
       }));
       manager.registerWorkspaceProvider({
+        id: "test-workspace",
         prepare: vi.fn(async () => ({
           cwd: "/ws/dir",
+          snapshot: vi.fn(() => ({ cwd: "/ws/dir" })),
+          suspend: vi.fn(() => ({
+            state: { cwd: "/ws/dir" },
+            resultAddendum: notice,
+          })),
           dispose: vi.fn(() => ({ resultAddendum: notice })),
         })),
+        restore: vi.fn(async () => {
+          throw new Error("workspace unavailable");
+        }),
       });
 
       const id = manager.spawn(STUB_SNAPSHOT, "general-purpose", "test", {
@@ -1584,7 +1682,8 @@ describe("SubagentManager", () => {
       await record.promise;
       await record.releaseSession();
 
-      expect(onSubagentWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(record, notice);
+      expect(record.result).toContain(notice);
+      expect(onSubagentWorkspaceNotice).not.toHaveBeenCalled();
     });
 
     it("stale disposer does not evict a later provider", () => {
@@ -1644,17 +1743,21 @@ describe("SubagentManager", () => {
         });
       });
 
-      it("reports a workspace torn down at run end, which the old guard let through", async () => {
+      it("restores a suspended workspace before resuming the child", async () => {
         const { factory } = createSessionFactory();
         ({ manager } = createManager({ createSubagentSession: factory }));
-        manager.registerWorkspaceProvider(makeWorkspaceProvider(makeWorkspace("/ws/dir")));
+        const provider = makeWorkspaceProvider(makeWorkspace("/ws/dir"));
+        manager.registerWorkspaceProvider(provider);
         const id = spawnBg(manager);
         await manager.getRecord(id)!.promise;
 
-        expect(await manager.resume(id, "continue")).toEqual({
-          kind: "refused",
-          reason: "workspace-disposed",
+        expect(await manager.resume(id, "continue")).toMatchObject({
+          kind: "resumed",
         });
+        expect(provider.restore).toHaveBeenCalledWith(
+          expect.objectContaining({ agentId: id }),
+          { cwd: "/ws/dir" },
+        );
       });
 
       it("starts no turn loop for a refused resume", async () => {

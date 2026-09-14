@@ -19,11 +19,15 @@ import { RunListeners } from "#src/lifecycle/run-listeners";
 import type {
 	PersistedSubagentRecord,
 	PersistedSubagentSession,
+	PersistedWorkspace,
 } from "#src/lifecycle/subagent-persistence";
 import type { SubagentSession, TurnLoopResult } from "#src/lifecycle/subagent-session";
 import { SubagentState, type SubagentStatus } from "#src/lifecycle/subagent-state";
 import type { LifetimeUsage } from "#src/lifecycle/usage";
-import type { WorkspaceProvider } from "#src/lifecycle/workspace";
+import {
+	type WorkspaceProvider,
+	WorkspaceRestoreError,
+} from "#src/lifecycle/workspace";
 import { WorkspaceBracket } from "#src/lifecycle/workspace-bracket";
 import { subscribeSubagentObserver } from "#src/observation/record-observer";
 import type { RunConfig } from "#src/runtime";
@@ -135,6 +139,8 @@ export interface SubagentInit {
 	parentEntryId?: string | null;
 	/** Existing child specification supplied when hydrating a durable record. */
 	resumeSpec?: PersistedSubagentSession;
+	/** Provider-owned checkpoint supplied when hydrating an isolated workspace. */
+	workspace?: PersistedWorkspace;
 }
 
 export class Subagent {
@@ -339,6 +345,7 @@ export class Subagent {
 		// Per-run lifecycle collaborators
 		this.workspaceBracket = new WorkspaceBracket(
 			this.execution.getWorkspaceProvider ?? (() => undefined),
+			init.workspace,
 		);
 	}
 
@@ -367,6 +374,7 @@ export class Subagent {
 					agentType: this.type,
 					baseCwd: this.execution.baseCwd,
 				});
+				this.execution.observer?.onStateChanged?.(this);
 			} catch (err) {
 				this.markError(err);
 				this.listeners.release();
@@ -518,16 +526,31 @@ export class Subagent {
 	/** Lazily reopen a released child before the manager starts its resumed turn. */
 	async prepareResume(): Promise<ResumeRefusal | undefined> {
 		const currentRefusal = this.resumeRefusal;
-		if (currentRefusal && currentRefusal !== "session-released") {
+		if (
+			currentRefusal &&
+			currentRefusal !== "session-released" &&
+			currentRefusal !== "unavailable" &&
+			currentRefusal !== "incompatible"
+		) {
 			return currentRefusal;
-		}
-		if (this.subagentSession) return undefined;
-		if (!this._resumeSpec || !this.execution.restoreSubagentSession) {
-			return currentRefusal ?? "no-session";
 		}
 
 		this.restoringSession = true;
+		this._restoreRefusal = undefined;
 		try {
+			// Restore the exact working directory before reopening the SDK session,
+			// whose persisted resource configuration points at that directory.
+			await this.workspaceBracket.restore({
+				agentId: this.id,
+				agentType: this.type,
+				baseCwd: this.execution.baseCwd,
+			});
+			this.execution.observer?.onStateChanged?.(this);
+			if (this.subagentSession) return undefined;
+			if (!this._resumeSpec || !this.execution.restoreSubagentSession) {
+				return currentRefusal ?? "no-session";
+			}
+
 			const runConfig = this.execution.getRunConfig?.();
 			this.subagentSession = await this.execution.restoreSubagentSession({
 				spec: this._resumeSpec,
@@ -544,7 +567,7 @@ export class Subagent {
 			this.execution.observer?.onSessionCreated?.(this);
 			return undefined;
 		} catch (err) {
-			this._restoreRefusal = err instanceof SubagentSessionRestoreError
+			this._restoreRefusal = err instanceof SubagentSessionRestoreError || err instanceof WorkspaceRestoreError
 				? err.reason
 				: "unavailable";
 			this.execution.observer?.onStateChanged?.(this);
@@ -569,24 +592,23 @@ export class Subagent {
 		}
 	}
 
-	/** Terminate a resume as completed: mark, dispose or hold the workspace, release listeners, notify observer. */
+	/** Terminate a resume as completed: checkpoint the workspace, release listeners, notify observer. */
 	completeResume(result: string): void {
-		// A child answering one question may need to ask another, which holds the
-		// workspace for the next resume the same way the original run did.
-		const finalResult = this.pendingQuestion !== undefined
-			? result
-			: result + this.workspaceBracket.dispose({ status: "completed", description: this.description });
+		const finalResult = result + this.workspaceBracket.suspend({
+			status: "completed",
+			description: this.description,
+		});
 		this.markCompleted(finalResult);
 		this.listeners.release();
 		this.execution.observer?.onResumeFinished?.(this);
 	}
 
-	/** Terminate a resume as errored: mark, release listeners, best-effort workspace dispose, notify observer. */
+	/** Terminate a resume as errored: mark, release listeners, best-effort workspace suspend, notify observer. */
 	failResume(err: unknown): void {
 		this.markError(err);
 		this.clearPendingQuestion();
 		this.listeners.release();
-		this.disposeWorkspaceQuietly("error");
+		this.suspendWorkspaceQuietly("error");
 		this.execution.observer?.onResumeFinished?.(this);
 	}
 
@@ -707,7 +729,7 @@ export class Subagent {
 		this.listeners.release();
 	}
 
-	/** Complete a run: release listeners, dispose the workspace, status transition, notify observer. */
+	/** Complete a run: release listeners, checkpoint the workspace, transition, notify observer. */
 	completeRun(result: TurnLoopResult): void {
 		this.listeners.release();
 
@@ -716,15 +738,10 @@ export class Subagent {
 			: result.steered
 				? "steered"
 				: "completed";
-		// A completed child that declared a question is inviting a resume, so its
-		// workspace stays live for the resume to re-enter. Every other outcome ends
-		// the run for good and tears it down here. The question was recorded by
-		// ask_parent during the run, so it is already on the record here.
-		const holdForResume = finalStatus === "completed" && this.pendingQuestion !== undefined;
-		const finalResult = holdForResume
-			? result.responseText
-			: result.responseText +
-				this.workspaceBracket.dispose({ status: finalStatus, description: this.description });
+		const finalResult = result.responseText + this.workspaceBracket.suspend({
+			status: finalStatus,
+			description: this.description,
+		});
 
 		if (result.aborted) this.markAborted(finalResult);
 		else if (result.steered) this.markSteered(finalResult);
@@ -755,7 +772,7 @@ export class Subagent {
 	async releaseSession(): Promise<void> {
 		const session = this.subagentSession;
 		if (!session) return;
-		this.disposeHeldWorkspace();
+		this.suspendHeldWorkspace();
 		this._releasedOutputFile = session.outputFile;
 		this._resumeSpec = session.resumeSpec ?? this._resumeSpec;
 		this.subagentSession = undefined;
@@ -764,12 +781,12 @@ export class Subagent {
 		this.execution.observer?.onStateChanged?.(this);
 	}
 
-	/** Fail a run: mark error, release listeners, best-effort workspace dispose, notify observer. */
+	/** Fail a run: mark error, release listeners, best-effort workspace suspend, notify observer. */
 	failRun(err: unknown): void {
 		this.markError(err);
 		this.clearPendingQuestion();
 		this.listeners.release();
-		this.disposeWorkspaceQuietly("error");
+		this.suspendWorkspaceQuietly("error");
 		this.execution.observer?.onRunFinished?.(this);
 	}
 
@@ -802,7 +819,27 @@ export class Subagent {
 			parentEntryId: this.parentEntryId,
 			state: this.state.snapshot(),
 			session: this.subagentSession?.resumeSpec ?? this._resumeSpec,
+			workspace: this.workspaceBracket.snapshot(),
 		};
+	}
+
+	/** Suspend a terminal workspace before releasing its in-memory child session. */
+	private suspendHeldWorkspace(): void {
+		if (this.isActive()) return;
+		const notice = this.suspendWorkspaceQuietly(this.status);
+		if (notice) this.execution.observer?.onWorkspaceNotice?.(this, notice);
+	}
+
+	/** Suspend a workspace without letting provider cleanup failure hide the child outcome. */
+	private suspendWorkspaceQuietly(status: SubagentStatus): string {
+		try {
+			const notice = this.workspaceBracket.suspend({ status, description: this.description });
+			if (notice) this.state.setWorkspaceNotice(notice);
+			return notice;
+		} catch (err) {
+			debugLog(`workspace suspend (${status})`, err);
+			return "";
+		}
 	}
 
 	/**

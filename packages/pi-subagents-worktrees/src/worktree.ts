@@ -27,19 +27,26 @@ export interface WorktreeInfo {
   path: string;
   /** Branch name created for this worktree (if changes exist). */
   branch: string;
+  /** Commit from which the detached worktree can be reconstructed. */
+  revision: string;
 }
 
 /** How a worktree's cleanup ended. Each outcome carries only its own data. */
 export type WorktreeCleanupResult =
   /** Nothing to save; the worktree was removed. */
-  | { outcome: "clean" }
+  | { outcome: "clean"; revision: string }
   /**
    * Changes were committed to `branch`; the worktree was removed.
    * `hooksBypassed` records whether the commit hooks had to be skipped.
    */
-  | { outcome: "committed"; branch: string; hooksBypassed: boolean }
+  | {
+      outcome: "committed";
+      branch: string;
+      revision: string;
+      hooksBypassed: boolean;
+    }
   /** Cleanup failed partway; the worktree was left at `path` for recovery. */
-  | { outcome: "failed"; path: string; error: string };
+  | { outcome: "failed"; path: string; revision: string; error: string };
 
 /**
  * Create a temporary git worktree for an agent.
@@ -49,6 +56,7 @@ export function createWorktree(
   cwd: string,
   agentId: string,
 ): WorktreeInfo | undefined {
+  let revision: string;
   // Verify we're in a git repo with at least one commit (HEAD must exist)
   try {
     execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
@@ -56,11 +64,13 @@ export function createWorktree(
       stdio: "pipe",
       timeout: 5000,
     });
-    execFileSync("git", ["rev-parse", "HEAD"], {
+    revision = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd,
       stdio: "pipe",
       timeout: 5000,
-    });
+    })
+      .toString()
+      .trim();
   } catch (err) {
     debugLog("createWorktree git rev-parse", err);
     return undefined;
@@ -77,7 +87,7 @@ export function createWorktree(
       stdio: "pipe",
       timeout: 30000,
     });
-    return { path: worktreePath, branch };
+    return { path: worktreePath, branch, revision };
   } catch (err) {
     debugLog("git worktree add", err);
     return undefined;
@@ -97,14 +107,15 @@ export function cleanupWorktree(
   agentDescription: string,
 ): WorktreeCleanupResult {
   if (!existsSync(worktree.path)) {
-    return { outcome: "clean" };
+    return { outcome: "clean", revision: worktree.revision };
   }
 
   try {
     if (!statusPorcelain(worktree.path)) {
       // No changes — remove worktree
+      const revision = currentRevision(worktree.path, worktree.revision);
       removeWorktree(cwd, worktree.path);
-      return { outcome: "clean" };
+      return { outcome: "clean", revision };
     }
 
     // Changes exist — stage, commit, and create a branch
@@ -112,12 +123,13 @@ export function cleanupWorktree(
     // Truncate description for commit message (no shell sanitization needed — execFileSync uses argv)
     const safeDesc = agentDescription.slice(0, 200);
     const hooksBypassed = commitStaged(worktree.path, `pi-agent: ${safeDesc}`);
+    const revision = currentRevision(worktree.path, worktree.revision);
     const branch = createBranch(worktree.path, worktree.branch);
 
     // Remove the worktree (branch persists in main repo)
     removeWorktree(cwd, worktree.path);
 
-    return { outcome: "committed", branch, hooksBypassed };
+    return { outcome: "committed", branch, revision, hooksBypassed };
   } catch (err) {
     // Never remove a worktree whose fate is uncertain: it can hold work that
     // was never written to the object database, which no `git fsck` recovers.
@@ -126,9 +138,41 @@ export function cleanupWorktree(
     return {
       outcome: "failed",
       path: worktree.path,
+      revision: currentRevision(worktree.path, worktree.revision),
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/** Reattach an existing worktree or recreate its removed checkout at the checkpoint revision. */
+export function restoreWorktree(
+  cwd: string,
+  worktree: WorktreeInfo,
+): WorktreeInfo {
+  if (existsSync(worktree.path)) {
+    // A crash may leave uncommitted work in the registered checkout. Reuse it
+    // verbatim; recreating or resetting it would destroy the very state being recovered.
+    if (!listWorktreePaths(cwd).includes(worktree.path)) {
+      throw new Error(
+        `Persisted worktree path is not registered: ${worktree.path}`,
+      );
+    }
+    return {
+      ...worktree,
+      revision: currentRevision(worktree.path, worktree.revision),
+    };
+  }
+
+  // Drop a stale administrative entry left after external directory removal,
+  // then reconstruct the detached checkout at the exact saved commit.
+  runGit(cwd, ["worktree", "prune"], 5000);
+  runGit(cwd, ["cat-file", "-e", `${worktree.revision}^{commit}`], 5000);
+  runGit(
+    cwd,
+    ["worktree", "add", "--detach", worktree.path, worktree.revision],
+    30000,
+  );
+  return worktree;
 }
 
 /**
@@ -207,6 +251,16 @@ function createBranch(worktreePath: string, preferred: string): string {
   }
 }
 
+/** Read the checkout revision, retaining the last durable value if Git cannot answer. */
+function currentRevision(worktreePath: string, fallback: string): string {
+  try {
+    return runGit(worktreePath, ["rev-parse", "HEAD"], 5000).trim();
+  } catch (err) {
+    debugLog("worktree revision", err);
+    return fallback;
+  }
+}
+
 /** Run a git command, returning its captured stdout. */
 function runGit(cwd: string, args: string[], timeout = 10000): string {
   return execFileSync("git", args, { cwd, stdio: "pipe", timeout }).toString();
@@ -239,6 +293,7 @@ function removeWorktree(cwd: string, worktreePath: string): void {
     } catch (pruneErr) {
       debugLog("git worktree prune", pruneErr);
     }
+    if (existsSync(worktreePath)) throw err;
   }
 }
 

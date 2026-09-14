@@ -12,19 +12,27 @@
  * try/catch belongs at the call site, preserving the per-caller semantics.
  */
 
+import type { PersistedWorkspace } from "#src/lifecycle/subagent-persistence";
 import type {
 	Workspace,
 	WorkspaceDisposeOutcome,
 	WorkspacePrepareContext,
 	WorkspaceProvider,
 } from "#src/lifecycle/workspace";
+import { WorkspaceRestoreError } from "#src/lifecycle/workspace";
 
 /** Owns the child workspace lifecycle: prepare at run-start, dispose at run-end. */
 export class WorkspaceBracket {
 	private prepared?: Workspace;
+	private persisted?: PersistedWorkspace;
 	private disposedWorkspace = false;
 
-	constructor(private readonly resolveProvider: () => WorkspaceProvider | undefined) {}
+	constructor(
+		private readonly resolveProvider: () => WorkspaceProvider | undefined,
+		persisted?: PersistedWorkspace,
+	) {
+		this.persisted = persisted;
+	}
 
 	/**
 	 * True once a prepared workspace has been torn down — the directory the run
@@ -53,7 +61,70 @@ export class WorkspaceBracket {
 		const provider = this.resolveProvider();
 		if (!provider) return undefined;
 		this.prepared = await provider.prepare(ctx);
+		if (this.prepared) {
+			this.persisted = {
+				providerId: provider.id,
+				state: this.prepared.snapshot(),
+			};
+		}
 		return this.prepared?.cwd;
+	}
+
+	/** Reconstruct a suspended workspace through the provider that created it. */
+	async restore(ctx: WorkspacePrepareContext): Promise<string | undefined> {
+		const persisted = this.persisted;
+		if (!persisted || this.prepared) return this.prepared?.cwd;
+
+		// Persisted state is provider-private; never hand it to an absent or
+		// differently identified implementation that might misinterpret it.
+		const provider = this.resolveProvider();
+		if (provider?.id !== persisted.providerId) {
+			throw new WorkspaceRestoreError(
+				"incompatible",
+				`Workspace provider "${persisted.providerId}" is not registered`,
+			);
+		}
+
+		try {
+			this.prepared = await provider.restore(ctx, persisted.state);
+			this.persisted = {
+				providerId: provider.id,
+				state: this.prepared.snapshot(),
+			};
+			return this.prepared.cwd;
+		} catch (err) {
+			if (isWorkspaceRestoreFailure(err)) {
+				throw new WorkspaceRestoreError(err.reason, err.message, { cause: err });
+			}
+			throw new WorkspaceRestoreError(
+				"unavailable",
+				`Workspace provider "${provider.id}" could not restore the workspace`,
+				{ cause: err },
+			);
+		}
+	}
+
+	/** Capture the checkpoint that keeps this workspace reachable across processes. */
+	snapshot(): PersistedWorkspace | undefined {
+		return this.persisted;
+	}
+
+	/** Release live resources but retain the provider checkpoint for a later resume. */
+	suspend(outcome: WorkspaceDisposeOutcome): string {
+		const workspace = this.prepared;
+		if (!workspace) return "";
+
+		const provider = this.resolveProvider();
+		if (!provider) {
+			throw new WorkspaceRestoreError(
+				"incompatible",
+				"The active workspace provider was unregistered before suspension",
+			);
+		}
+		const suspended = workspace.suspend(outcome);
+		this.prepared = undefined;
+		this.persisted = { providerId: provider.id, state: suspended.state };
+		return suspended.resultAddendum ?? "";
 	}
 
 	/**
@@ -68,9 +139,25 @@ export class WorkspaceBracket {
 	 */
 	dispose(outcome: WorkspaceDisposeOutcome): string {
 		const workspace = this.prepared;
-		if (!workspace) return "";
+		if (!workspace) {
+			if (this.persisted) {
+				this.persisted = undefined;
+				this.disposedWorkspace = true;
+			}
+			return "";
+		}
 		this.prepared = undefined;
+		this.persisted = undefined;
 		this.disposedWorkspace = true;
 		return workspace.dispose(outcome)?.resultAddendum ?? "";
 	}
+}
+
+/** Recognize a provider's stable refusal without sharing its concrete Error class. */
+function isWorkspaceRestoreFailure(
+	error: unknown,
+): error is Error & { reason: "unavailable" | "incompatible" } {
+	return error instanceof Error &&
+		("reason" in error) &&
+		(error.reason === "unavailable" || error.reason === "incompatible");
 }

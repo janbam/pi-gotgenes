@@ -676,7 +676,8 @@ describe("Subagent.run() — workspace provider", () => {
 
 	it("calls prepare with exactly the run-start context", async () => {
 		const prepare = vi.fn((_ctx: WorkspacePrepareContext) => Promise.resolve(makeWorkspace("/ws/dir")));
-		const agent = createRunnableAgent({ workspaceProvider: { prepare }, baseCwd: "/parent" });
+		const provider = makeWorkspaceProvider(undefined);
+		const agent = createRunnableAgent({ workspaceProvider: { ...provider, prepare }, baseCwd: "/parent" });
 		await agent.run();
 		// toStrictEqual, not toHaveBeenCalledWith: the latter compares with toEqual
 		// semantics, which ignore an explicitly-undefined key — so it cannot see a
@@ -688,12 +689,12 @@ describe("Subagent.run() — workspace provider", () => {
 		});
 	});
 
-	it("appends the dispose resultAddendum to the result", async () => {
+	it("appends the suspension resultAddendum to the result", async () => {
 		const workspace = makeWorkspace("/ws/dir", { resultAddendum: "\n\n---\nsaved to branch foo" });
 		const agent = createRunnableAgent({ workspaceProvider: makeWorkspaceProvider(workspace) });
 		await agent.run();
 		expect(agent.result).toBe("done\n\n---\nsaved to branch foo");
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "completed", description: "run test" });
+		expect(workspace.suspend).toHaveBeenCalledWith({ status: "completed", description: "run test" });
 	});
 
 	it("falls back to baseCwd (cwd undefined) when prepare returns undefined", async () => {
@@ -708,7 +709,10 @@ describe("Subagent.run() — workspace provider", () => {
 
 	it("marks error and fires onRunFinished when prepare rejects", async () => {
 		const onRunFinished = vi.fn();
-		const provider: WorkspaceProvider = { prepare: vi.fn(() => Promise.reject(new Error("prepare failed"))) };
+		const provider: WorkspaceProvider = {
+			...makeWorkspaceProvider(undefined),
+			prepare: vi.fn(() => Promise.reject(new Error("prepare failed"))),
+		};
 		const agent = createRunnableAgent({ workspaceProvider: provider, observer: { onRunFinished } });
 		await agent.run();
 		expect(agent.status).toBe("error");
@@ -716,14 +720,14 @@ describe("Subagent.run() — workspace provider", () => {
 		expect(onRunFinished).toHaveBeenCalledOnce();
 	});
 
-	it("disposes with status error when the turn loop throws", async () => {
+	it("suspends with status error when the turn loop throws", async () => {
 		const { factory, stub } = createFactory();
 		stub.runTurnLoop.mockRejectedValue(new Error("turn loop exploded"));
 		const workspace = makeWorkspace("/ws/dir", { resultAddendum: ADDENDUM });
 		const agent = createRunnableAgent({ createSubagentSession: factory, workspaceProvider: makeWorkspaceProvider(workspace) });
 		await agent.run();
 		expect(agent.status).toBe("error");
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "error", description: "run test" });
+		expect(workspace.suspend).toHaveBeenCalledWith({ status: "error", description: "run test" });
 		// A failed run has no result text; the addendum is kept as a notice instead.
 		expect(agent.result).toBeUndefined();
 		expect(agent.workspaceNotice).toBe(ADDENDUM);
@@ -735,10 +739,14 @@ describe("Subagent — workspaceDisposed", () => {
 		expect(createRunnableAgent({ workspaceProvider: makeWorkspaceProvider(makeWorkspace("/ws/dir")) }).workspaceDisposed).toBe(false);
 	});
 
-	it("is true after a run that disposed a prepared workspace", async () => {
+	it("stays false after a run that suspended a prepared workspace", async () => {
 		const agent = createRunnableAgent({ workspaceProvider: makeWorkspaceProvider(makeWorkspace("/ws/dir")) });
 		await agent.run();
-		expect(agent.workspaceDisposed).toBe(true);
+		expect(agent.workspaceDisposed).toBe(false);
+		expect(agent.toPersistedRecord().workspace).toEqual({
+			providerId: "test-workspace",
+			state: { cwd: "/ws/dir" },
+		});
 	});
 
 	it("stays false for an agent that never had a workspace", async () => {
@@ -786,18 +794,18 @@ describe("Subagent — resumeRefusal", () => {
 		expect(agent.resumeRefusal).toBe("session-released");
 	});
 
-	it("reports workspace-disposed while the session is still live", async () => {
+	it("keeps a suspended workspace resumable while the session is still live", async () => {
 		const agent = createRunnableAgent({ workspaceProvider: makeWorkspaceProvider(makeWorkspace("/ws/dir")) });
 		await agent.run();
 		expect(agent.isSessionReady()).toBe(true);
-		expect(agent.resumeRefusal).toBe("workspace-disposed");
+		expect(agent.resumeRefusal).toBeUndefined();
 	});
 
-	it("prefers the released session over the workspace when both are gone", async () => {
+	it("reports the released session while retaining the workspace checkpoint", async () => {
 		const agent = createRunnableAgent({ workspaceProvider: makeWorkspaceProvider(makeWorkspace("/ws/dir")) });
 		await agent.run();
 		await agent.releaseSession();
-		expect(agent.workspaceDisposed).toBe(true);
+		expect(agent.workspaceDisposed).toBe(false);
 		expect(agent.resumeRefusal).toBe("session-released");
 	});
 
@@ -836,87 +844,90 @@ async function runWithWorkspace(
 	return { agent, workspace, stub, ask: (question: string) => askParent?.(question) };
 }
 
-/** Run an agent to a question-ending completion, so its workspace is still held. */
+	/** Run an agent to a question-ending completion with a resumable workspace checkpoint. */
 function heldWorkspaceAgent() {
 	return runWithWorkspace({ responseText: "Mapped the configs.", question: "Which one?" });
 }
 
-describe("Subagent — workspace hold for a declared question", () => {
-	it("holds the workspace when a completed child declared a question", async () => {
+describe("Subagent — workspace suspension for terminal runs", () => {
+	it("suspends the workspace when a completed child declared a question", async () => {
 		const { agent, workspace } = await heldWorkspaceAgent();
-		expect(workspace.dispose).not.toHaveBeenCalled();
+		expect(workspace.suspend).toHaveBeenCalledWith({ status: "completed", description: "run test" });
 		expect(agent.workspaceDisposed).toBe(false);
 		expect(agent.pendingQuestion).toBe("Which one?");
-		// Nothing was disposed, so there is no addendum to fold in yet.
-		expect(agent.result).toBe("Mapped the configs.");
+		expect(agent.result).toBe(`Mapped the configs.${ADDENDUM}`);
 	});
 
-	it("disposes an aborted run that declared a question", async () => {
+	it("suspends an aborted run that declared a question", async () => {
 		const { agent, workspace } = await runWithWorkspace({
 			responseText: "",
 			question: "Still stuck?",
 			aborted: true,
 		});
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "aborted", description: "run test" });
+		expect(workspace.suspend).toHaveBeenCalledWith({ status: "aborted", description: "run test" });
 		expect(agent.pendingQuestion).toBe("Still stuck?");
 		expect(agent.result).toBe(ADDENDUM);
 	});
 
-	it("disposes a steered run that declared a question", async () => {
+	it("suspends a steered run that declared a question", async () => {
 		const { agent, workspace } = await runWithWorkspace({
 			responseText: "Partway.",
 			question: "Which one?",
 			steered: true,
 		});
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "steered", description: "run test" });
+		expect(workspace.suspend).toHaveBeenCalledWith({ status: "steered", description: "run test" });
 		expect(agent.result).toBe(`Partway.${ADDENDUM}`);
 	});
 });
 
-describe("Subagent — disposing a held workspace", () => {
-	it("disposes when the resumed child answers without asking again", async () => {
+describe("Subagent — restoring and resuspending a workspace", () => {
+	it("restores before resume and suspends again when the child answers", async () => {
 		const { agent, workspace, stub } = await heldWorkspaceAgent();
 		stub.resumeTurnLoop.mockResolvedValue("Used the project config. Done.");
 
+		await agent.prepareResume();
 		await agent.resume("The project one.");
 
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "completed", description: "run test" });
+		expect(workspace.suspend).toHaveBeenCalledTimes(2);
 		expect(agent.result).toBe(`Used the project config. Done.${ADDENDUM}`);
 	});
 
-	it("keeps holding when the resumed child declares another question", async () => {
+	it("suspends again when the resumed child declares another question", async () => {
 		const { agent, workspace, stub, ask } = await heldWorkspaceAgent();
 		stub.resumeTurnLoop.mockImplementation(() => {
 			ask("And the fallback?");
 			return Promise.resolve("Thanks.");
 		});
 
+		await agent.prepareResume();
 		await agent.resume("The project one.");
 
-		expect(workspace.dispose).not.toHaveBeenCalled();
+		expect(workspace.suspend).toHaveBeenCalledTimes(2);
 		expect(agent.pendingQuestion).toBe("And the fallback?");
 	});
 
-	it("disposes best-effort when the resume throws", async () => {
+	it("suspends best-effort when the resume throws", async () => {
 		const { agent, workspace, stub } = await heldWorkspaceAgent();
 		stub.resumeTurnLoop.mockRejectedValue(new Error("resume exploded"));
 
+		await agent.prepareResume();
 		await expect(agent.resume("The project one.")).resolves.toBeUndefined();
 
 		expect(agent.status).toBe("error");
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "error", description: "run test" });
+		expect(workspace.suspend).toHaveBeenLastCalledWith({ status: "error", description: "run test" });
 	});
 
-	it("disposes when the retention sweep releases the session", async () => {
+	it("does not suspend again when retention releases an already checkpointed session", async () => {
 		const { agent, workspace } = await heldWorkspaceAgent();
 		await agent.releaseSession();
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "completed", description: "run test" });
+		expect(workspace.suspend).toHaveBeenCalledOnce();
 	});
 
-	it("disposes when the record's session is torn down", async () => {
+	it("deletes the durable checkpoint when the record is torn down", async () => {
 		const { agent, workspace } = await heldWorkspaceAgent();
 		await agent.disposeSession();
-		expect(workspace.dispose).toHaveBeenCalledWith({ status: "completed", description: "run test" });
+		expect(workspace.dispose).not.toHaveBeenCalled();
+		expect(agent.toPersistedRecord().workspace).toBeUndefined();
 	});
 
 	it("leaves a running agent's workspace alone when its session is torn down", async () => {
@@ -938,11 +949,11 @@ describe("Subagent — disposing a held workspace", () => {
 		await agent.promise;
 	});
 
-	it("disposes a held workspace only once across release and teardown", async () => {
+	it("suspends a workspace only once across release and teardown", async () => {
 		const { agent, workspace } = await heldWorkspaceAgent();
 		await agent.releaseSession();
 		await agent.disposeSession();
-		expect(workspace.dispose).toHaveBeenCalledOnce();
+		expect(workspace.suspend).toHaveBeenCalledOnce();
 	});
 });
 
@@ -971,40 +982,41 @@ describe("Subagent — workspaceNotice", () => {
 		expect(agent.workspaceNotice).toBeUndefined();
 	});
 
-	it("holds the addendum a failed run's disposal reported", async () => {
+	it("holds the addendum a failed run's suspension reported", async () => {
 		const { agent } = await runFailingWithWorkspace({ resultAddendum: ADDENDUM });
 		expect(agent.workspaceNotice).toBe(ADDENDUM);
 	});
 
-	it("holds the addendum a failed resume's disposal reported", async () => {
+	it("holds the addendum a failed resume's suspension reported", async () => {
 		const { agent, stub } = await heldWorkspaceAgent();
 		stub.resumeTurnLoop.mockRejectedValue(new Error("resume exploded"));
+		await agent.prepareResume();
 		await agent.resume("the answer");
 		expect(agent.status).toBe("error");
 		expect(agent.workspaceNotice).toBe(ADDENDUM);
 	});
 
-	it("holds the addendum the retention sweep's release reported", async () => {
+	it("does not create a late notice when retention releases an already suspended workspace", async () => {
 		const { agent } = await heldWorkspaceAgent();
 		await agent.releaseSession();
-		expect(agent.workspaceNotice).toBe(ADDENDUM);
+		expect(agent.workspaceNotice).toBeUndefined();
 	});
 
-	it("holds the addendum a session teardown reported", async () => {
+	it("does not create a late notice when teardown deletes a suspended checkpoint", async () => {
 		const { agent } = await heldWorkspaceAgent();
 		await agent.disposeSession();
-		expect(agent.workspaceNotice).toBe(ADDENDUM);
+		expect(agent.workspaceNotice).toBeUndefined();
 	});
 
-	it("stays undefined when the quiet disposal reported nothing", async () => {
+	it("stays undefined when quiet suspension reported nothing", async () => {
 		const { agent } = await runFailingWithWorkspace();
-		expect(agent.workspaceDisposed).toBe(true);
+		expect(agent.workspaceDisposed).toBe(false);
 		expect(agent.workspaceNotice).toBeUndefined();
 	});
 });
 
-describe("Subagent — announcing a notice produced after the result was delivered", () => {
-	/** A held-workspace agent whose observer records every workspace notice. */
+describe("Subagent — avoiding duplicate workspace notices after checkpointing", () => {
+	/** A checkpointed-workspace agent whose observer records every late notice. */
 	async function heldAgentWithObserver() {
 		const onWorkspaceNotice = vi.fn<(agent: Subagent, notice: string) => void>();
 		const stub = createSubagentSessionStub();
@@ -1027,23 +1039,23 @@ describe("Subagent — announcing a notice produced after the result was deliver
 		return { agent, workspace, stub, onWorkspaceNotice };
 	}
 
-	it("announces when the retention sweep releases the session", async () => {
+	it("announces nothing when retention releases the session", async () => {
 		const { agent, onWorkspaceNotice } = await heldAgentWithObserver();
 		await agent.releaseSession();
-		expect(onWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(agent, ADDENDUM);
+		expect(onWorkspaceNotice).not.toHaveBeenCalled();
 	});
 
-	it("announces when the record's session is torn down", async () => {
+	it("announces nothing when the record's checkpoint is deleted", async () => {
 		const { agent, onWorkspaceNotice } = await heldAgentWithObserver();
 		await agent.disposeSession();
-		expect(onWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(agent, ADDENDUM);
+		expect(onWorkspaceNotice).not.toHaveBeenCalled();
 	});
 
-	it("announces once across a release and the teardown that follows it", async () => {
+	it("announces nothing across release and teardown", async () => {
 		const { agent, onWorkspaceNotice } = await heldAgentWithObserver();
 		await agent.releaseSession();
 		await agent.disposeSession();
-		expect(onWorkspaceNotice).toHaveBeenCalledOnce();
+		expect(onWorkspaceNotice).not.toHaveBeenCalled();
 	});
 
 	it("announces nothing when the teardown reported nothing", async () => {
@@ -1097,6 +1109,7 @@ describe("Subagent — announcing a notice produced after the result was deliver
 	it("does not announce for a failed resume, whose own notification carries it", async () => {
 		const { agent, stub, onWorkspaceNotice } = await heldAgentWithObserver();
 		stub.resumeTurnLoop.mockRejectedValue(new Error("resume exploded"));
+		await agent.prepareResume();
 		await agent.resume("the answer");
 		expect(agent.workspaceNotice).toBe(ADDENDUM);
 		expect(onWorkspaceNotice).not.toHaveBeenCalled();

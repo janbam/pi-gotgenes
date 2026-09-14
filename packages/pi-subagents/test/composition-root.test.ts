@@ -78,6 +78,7 @@ function makePi() {
       }),
       events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
       appendEntry: vi.fn(),
+      setSessionState: vi.fn(),
       sendMessage: vi.fn(),
       exec: vi.fn(),
     } as any,
@@ -136,7 +137,9 @@ function makeSessionStartCtx(
     sessionManager: {
       getSessionId: vi.fn(() => "session-1"),
       getSessionFile: vi.fn(() => "/sessions/parent.jsonl"),
+      getLeafId: vi.fn(() => null),
       getBranch: vi.fn(() => []),
+      getSessionState: vi.fn(() => undefined),
     },
     getSystemPrompt: vi.fn(() => "parent prompt"),
   } as any;

@@ -14,6 +14,7 @@ import {
   createWorktree,
   discardWorktree,
   pruneWorktrees,
+  restoreWorktree,
   type WorktreeCleanupResult,
 } from "#src/worktree";
 import {
@@ -57,6 +58,7 @@ describe("worktree", () => {
       expect(wt).toBeDefined();
       expect(existsSync(wt!.path)).toBe(true);
       expect(wt!.branch).toBe("pi-agent-test-id-1");
+      expect(wt!.revision).toMatch(/^[0-9a-f]{40}$/);
 
       // Verify it's a valid worktree with the repo's files
       expect(existsSync(join(wt!.path, "README.md"))).toBe(true);
@@ -157,7 +159,7 @@ describe("worktree", () => {
       const wt = worktreeFor("clean-1");
 
       const result = cleanupWorktree(repoDir, wt, "test cleanup");
-      expect(result).toEqual({ outcome: "clean" });
+      expect(result).toEqual({ outcome: "clean", revision: wt.revision });
     });
 
     it("commits changes and creates branch when changes exist", () => {
@@ -170,6 +172,14 @@ describe("worktree", () => {
       assertOutcome(result, "committed");
       expect(result.hooksBypassed).toBe(false);
       expect(result.branch).toContain("pi-agent-dirty-1");
+      expect(result.revision).toBe(
+        execFileSync("git", ["rev-parse", result.branch], {
+          cwd: repoDir,
+          stdio: "pipe",
+        })
+          .toString()
+          .trim(),
+      );
 
       // Verify the branch exists in the main repo
       const branches = execFileSync(
@@ -237,7 +247,7 @@ describe("worktree", () => {
       rmSync(wt.path, { recursive: true, force: true });
 
       const result = cleanupWorktree(repoDir, wt, "already gone");
-      expect(result).toEqual({ outcome: "clean" });
+      expect(result).toEqual({ outcome: "clean", revision: wt.revision });
     });
 
     it("bypasses hooks to save the work when the rescue commit is rejected", () => {
@@ -311,6 +321,57 @@ describe("worktree", () => {
         .trim();
       // "pi-agent: " prefix (10 chars) + 200 chars of x = 210 total max
       expect(log.length).toBeLessThanOrEqual(220); // some slack for hash prefix
+    });
+  });
+
+  describe("restoreWorktree", () => {
+    it("recreates a removed clean worktree at its original path and revision", () => {
+      const wt = createWorktree(repoDir, "restore-clean")!;
+      cleanupWorktree(repoDir, wt, "clean checkpoint");
+
+      const restored = restoreWorktree(repoDir, wt);
+
+      expect(restored).toEqual(wt);
+      expect(existsSync(wt.path)).toBe(true);
+      expect(
+        execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: wt.path,
+          stdio: "pipe",
+        })
+          .toString()
+          .trim(),
+      ).toBe(wt.revision);
+      discardWorktree(repoDir, wt.path);
+    });
+
+    it("recreates a removed dirty worktree from its rescue commit", () => {
+      const wt = createWorktree(repoDir, "restore-dirty")!;
+      writeFileSync(join(wt.path, "resumable.txt"), "saved child work");
+      const checkpoint = cleanupWorktree(repoDir, wt, "dirty checkpoint");
+      assertOutcome(checkpoint, "committed");
+
+      const restored = restoreWorktree(repoDir, {
+        ...wt,
+        revision: checkpoint.revision,
+      });
+
+      expect(readFileSync(join(restored.path, "resumable.txt"), "utf8")).toBe(
+        "saved child work",
+      );
+      discardWorktree(repoDir, restored.path);
+    });
+
+    it("reuses an existing registered worktree without disturbing dirty files", () => {
+      const wt = createWorktree(repoDir, "restore-live")!;
+      writeFileSync(join(wt.path, "uncommitted.txt"), "survives crash");
+
+      const restored = restoreWorktree(repoDir, wt);
+
+      expect(restored).toEqual(wt);
+      expect(readFileSync(join(wt.path, "uncommitted.txt"), "utf8")).toBe(
+        "survives crash",
+      );
+      discardWorktree(repoDir, wt.path);
     });
   });
 
