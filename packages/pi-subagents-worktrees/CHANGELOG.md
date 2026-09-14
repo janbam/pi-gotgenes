@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-worktrees-v0.3.3...pi-subagents-worktrees-v1.0.0) (2026-09-14)
+
+
+### Features
+
+* **pi-subagents:** **breaking:** keep subagents durably resumable ([f5eff30](https://github.com/gotgenes/pi-packages/commit/f5eff30d95724d1d49cbe62811488d31f3ac36f0))
+
+### Miscellaneous Chores
+
+* reconcile fork with upstream main ([49c854c](https://github.com/gotgenes/pi-packages/commit/49c854cffc9d6f9a7721c73ffaa6bcc52c031b4e))
+
 ## [0.3.3](https://github.com/gotgenes/pi-packages/compare/pi-subagents-worktrees-v0.3.2...pi-subagents-worktrees-v0.3.3) (2026-09-05)
 
 

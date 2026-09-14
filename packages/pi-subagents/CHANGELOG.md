@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [22.0.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.7.0...pi-subagents-v22.0.0) (2026-09-14)
+
+
+### Features
+
+* **pi-subagents:** switch Explore agent to deepseek-v4-flash with high thinking ([d045a1d](https://github.com/gotgenes/pi-packages/commit/d045a1dc8c6284e6b401adbb5e8869e0c7f7dd7c))
+* **pi-subagents:** include the agent ID in foreground agent results ([c3f00b0](https://github.com/gotgenes/pi-packages/commit/c3f00b06b5f19c9c57ef79618e8abe8f2885942b))
+* **pi-subagents:** abort running subagents from the sessions viewer ([00851d3](https://github.com/gotgenes/pi-packages/commit/00851d32b41eef4533e1114055d515205d28a307))
+* **pi-subagents:** **breaking:** keep subagents durably resumable ([f5eff30](https://github.com/gotgenes/pi-packages/commit/f5eff30d95724d1d49cbe62811488d31f3ac36f0))
+
+### Bug Fixes
+
+* **pi-subagents:** explain invalid model requests ([999dc26](https://github.com/gotgenes/pi-packages/commit/999dc2636ad8abc91470a03862a4affbc2b7bcb6))
+* **pi-subagents:** let the SDK clamp unsupported reasoning levels again ([98eb896](https://github.com/gotgenes/pi-packages/commit/98eb896aa21211d4293be8c02bbc597bf02ec84a))
+
+### Miscellaneous Chores
+
+* reconcile fork with upstream main ([49c854c](https://github.com/gotgenes/pi-packages/commit/49c854cffc9d6f9a7721c73ffaa6bcc52c031b4e))
+
 ## [21.7.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.6.0...pi-subagents-v21.7.0) (2026-09-11)
 
 
