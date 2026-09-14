@@ -256,8 +256,9 @@ describe("SubagentManager", () => {
       );
     });
 
-    it("reopens and resumes the same ID after parent deactivation and activation", async () => {
-      const parent = parentState();
+    it("reopens and resumes the same ID after parent compaction and process reactivation", async () => {
+      const branchIds = ["entry-1"];
+      const parent = parentState(undefined, branchIds);
       const fresh = createSessionFactory(createMockSession(), "/tasks/agent.jsonl");
       const first = createManager({
         createSubagentSession: fresh.factory,
@@ -275,6 +276,10 @@ describe("SubagentManager", () => {
         },
       });
       await first.getRecord(id)!.promise;
+
+      // Parent compaction extends the active branch but must retain handles
+      // anchored earlier in that same ancestry.
+      branchIds.push("compaction-1");
       await first.deactivate();
 
       const reopened = createSubagentSessionStub(
@@ -390,7 +395,7 @@ describe("SubagentManager", () => {
       });
     });
 
-    it("does not expose a durable ID to an unrelated parent session", () => {
+    it("does not expose or resume a durable ID from an unrelated parent session", async () => {
       const origin = parentState({
         version: 1,
         records: [persistedRecord("origin-agent", "entry-1")],
@@ -404,6 +409,10 @@ describe("SubagentManager", () => {
       manager.activate(unrelated.ctx);
 
       expect(manager.getRecord("origin-agent")).toBeUndefined();
+      await expect(manager.resume("origin-agent", "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "unknown-agent",
+      });
       expect(origin.read()).toBeDefined();
     });
 
