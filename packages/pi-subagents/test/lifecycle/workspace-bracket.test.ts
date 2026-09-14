@@ -145,6 +145,31 @@ describe("WorkspaceBracket — suspend", () => {
 		expect(bracket.suspend(outcome)).toBe("");
 		expect(workspace.suspend).toHaveBeenCalledOnce();
 	});
+
+	it("keeps the identity of the provider that prepared the workspace", async () => {
+		const workspace = makeWorkspace("/ws/dir");
+		const firstProvider = {
+			...makeWorkspaceProvider(workspace),
+			id: "first-provider",
+		};
+		const replacementProvider = {
+			...makeWorkspaceProvider(undefined),
+			id: "replacement-provider",
+		};
+		let provider = firstProvider;
+		const bracket = new WorkspaceBracket(() => provider);
+		await bracket.prepare(ctx);
+
+		// Provider registration may change while a run owns the workspace; its
+		// opaque checkpoint must still remain attributable to its creator.
+		provider = replacementProvider;
+		bracket.suspend(outcome);
+
+		expect(bracket.snapshot()).toEqual({
+			providerId: "first-provider",
+			state: { cwd: "/ws/dir" },
+		});
+	});
 });
 
 describe("WorkspaceBracket — dispose", () => {

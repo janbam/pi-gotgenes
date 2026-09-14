@@ -1,7 +1,7 @@
 import type { SessionContext } from "#src/types";
 
 /**
- * Session lifecycle event handlers: session_start, session_before_switch, session_shutdown.
+ * Session lifecycle event handlers: start, switch, tree navigation, and shutdown.
  *
  * Extracted from index.ts so each handler can be tested in isolation
  * with mocked narrow interfaces.
@@ -45,6 +45,17 @@ export class SessionLifecycleHandler {
 
   handleSessionBeforeSwitch(): Promise<void> {
     return this.manager.deactivate();
+  }
+
+  /** Replace the activated registry after `/tree` selects a new ancestry. */
+  async handleSessionTree(_event: unknown, ctx: unknown): Promise<void> {
+    const sessionContext = ctx as SessionContext;
+
+    // The leaf has already changed, but the cache still represents the old
+    // ancestry. Persist and settle it before exposing the selected branch.
+    await this.manager.deactivate();
+    this.runtime.setSessionContext(sessionContext);
+    this.manager.activate(sessionContext);
   }
 
   // Cleanup order matters:

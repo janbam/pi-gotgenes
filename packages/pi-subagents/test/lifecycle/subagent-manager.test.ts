@@ -463,6 +463,31 @@ describe("SubagentManager", () => {
         reason: "deleted",
       });
     });
+
+    it("waits for in-flight session creation before clearing a deactivated registry", async () => {
+      const parent = parentState();
+      const sessionGate = Promise.withResolvers<SubagentSession>();
+      const manager = createManager({
+        createSubagentSession: vi.fn(() => sessionGate.promise),
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+      const id = spawnBg(manager);
+
+      let deactivated = false;
+      const pending = manager.deactivate().then(() => { deactivated = true; });
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+
+      expect(deactivated).toBe(false);
+      expect(manager.getRecord(id)).toBeDefined();
+
+      sessionGate.resolve(toSubagentSession(createSubagentSessionStub()));
+      await pending;
+
+      expect(deactivated).toBe(true);
+      expect(manager.listAgents()).toEqual([]);
+    });
   });
 
   describe("spawn", () => {

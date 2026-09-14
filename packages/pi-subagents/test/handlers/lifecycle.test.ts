@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { LifecycleManager, LifecycleRuntime } from "#src/handlers/lifecycle";
 import { SessionLifecycleHandler } from "#src/handlers/lifecycle";
 import type { SessionContext } from "#src/types";
@@ -6,17 +6,13 @@ import type { SessionContext } from "#src/types";
 describe("SessionLifecycleHandler", () => {
   let runtime: LifecycleRuntime;
   let manager: LifecycleManager;
-  let activate: ReturnType<typeof vi.fn<LifecycleManager["activate"]>>;
-  let deactivate: ReturnType<typeof vi.fn<LifecycleManager["deactivate"]>>;
-  let dispose: ReturnType<typeof vi.fn<LifecycleManager["dispose"]>>;
-  let setSessionContext: ReturnType<
-    typeof vi.fn<LifecycleRuntime["setSessionContext"]>
-  >;
-  let clearSessionContext: ReturnType<
-    typeof vi.fn<LifecycleRuntime["clearSessionContext"]>
-  >;
-  let disposeNotifications: ReturnType<typeof vi.fn<() => void>>;
-  let unpublishService: ReturnType<typeof vi.fn<() => void>>;
+  let activate: Mock<LifecycleManager["activate"]>;
+  let deactivate: Mock<LifecycleManager["deactivate"]>;
+  let dispose: Mock<LifecycleManager["dispose"]>;
+  let setSessionContext: Mock<LifecycleRuntime["setSessionContext"]>;
+  let clearSessionContext: Mock<LifecycleRuntime["clearSessionContext"]>;
+  let disposeNotifications: Mock<() => void>;
+  let unpublishService: Mock<() => void>;
   let handler: SessionLifecycleHandler;
 
   beforeEach(() => {
@@ -67,6 +63,22 @@ describe("SessionLifecycleHandler", () => {
       gate.resolve();
       await pending;
       expect(settled).toBe(true);
+    });
+  });
+
+  describe("handleSessionTree", () => {
+    it("deactivates the old ancestry before activating the selected branch", async () => {
+      const calls: string[] = [];
+      const ctx = { cwd: "/selected/branch" } as SessionContext;
+      deactivate.mockImplementation(async () => { calls.push("deactivate"); });
+      setSessionContext.mockImplementation(() => { calls.push("context"); });
+      activate.mockImplementation(() => { calls.push("activate"); });
+
+      await handler.handleSessionTree({}, ctx);
+
+      expect(setSessionContext).toHaveBeenCalledWith(ctx);
+      expect(activate).toHaveBeenCalledWith(ctx);
+      expect(calls).toEqual(["deactivate", "context", "activate"]);
     });
   });
 

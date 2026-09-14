@@ -145,6 +145,16 @@ function makeSessionStartCtx(
   } as any;
 }
 
+describe("composition root: parent lineage lifecycle", () => {
+  it("registers a post-navigation handler that can refresh the active branch", () => {
+    const { pi, handlers } = makePi();
+
+    subagentsExtension(pi);
+
+    expect(handlers.get("session_tree")).toHaveLength(1);
+  });
+});
+
 /** Run the extension far enough to capture the deps bag the root assembled. */
 async function captureSessionFactoryIO(parentRegistry: unknown) {
   vi.mocked(createSubagentSession).mockResolvedValue(

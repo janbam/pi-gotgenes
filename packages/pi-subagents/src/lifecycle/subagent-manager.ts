@@ -387,14 +387,19 @@ export class SubagentManager {
   }
 
   /** Persist and release the outgoing parent view without deleting durable records. */
-  // fallow-ignore-next-line unused-class-member -- LifecycleHandlers invokes this public boundary through its manager dependency.
   async deactivate(): Promise<void> {
     if (!this.activeSession) return;
 
-    // Stop process-local work before another parent becomes active, then wait
-    // until child JSONL writes and terminal observers have settled.
+    // Capture handles while records are still active: abort transitions them
+    // synchronously, but their factories, JSONL writes, and terminal observers
+    // may continue until the already-published promises settle.
+    const inFlight = this.pendingPromises();
     this.abortAll();
     this.persistRegistry();
+    await Promise.allSettled(inFlight);
+
+    // Include any work admitted concurrently before the lifecycle boundary
+    // finished, then persist only settled terminal state.
     await this.waitForAll();
     this.persistRegistry();
 

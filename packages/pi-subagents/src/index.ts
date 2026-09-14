@@ -224,6 +224,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => lifecycle.handleSessionStart(event, ctx));
   pi.on("session_start", (event, ctx) => widgetEvents.handleSessionStart(event, ctx));
   pi.on("session_before_switch", () => lifecycle.handleSessionBeforeSwitch());
+  pi.on("session_tree", (event, ctx) => lifecycle.handleSessionTree(event, ctx));
   pi.on("session_shutdown", () => lifecycle.handleSessionShutdown());
   // Registered after the lifecycle handler on purpose. Pi awaits an extension's
   // handlers for an event in registration order, so the widget is torn down once

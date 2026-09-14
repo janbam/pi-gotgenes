@@ -194,6 +194,7 @@ function makeRuntimeStub(override: Partial<ServiceRuntimeLike> = {}): ServiceRun
     getSessionInfo: vi.fn(() => ({
       parentSessionFile: "/sessions/parent.jsonl",
       parentSessionId: "parent-session-123",
+      parentEntryId: "parent-entry-456",
     })),
     ...override,
   };
@@ -394,6 +395,7 @@ describe("SubagentsServiceAdapter — spawn", () => {
           parentSession: {
             parentSessionFile: "/sessions/parent.jsonl",
             parentSessionId: "parent-session-123",
+            parentEntryId: "parent-entry-456",
           },
         }),
       );

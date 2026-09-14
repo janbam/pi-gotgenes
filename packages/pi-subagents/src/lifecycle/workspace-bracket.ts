@@ -1,15 +1,13 @@
 /**
- * workspace-bracket.ts — Owned prepare/dispose lifecycle for a child workspace.
+ * workspace-bracket.ts — Owned resumable lifecycle for a child workspace.
  *
  * Captures the provider resolver (not the provider itself) so provider
- * resolution stays lazy at run-start. The prepared Workspace is held
- * privately; dispose() centralises the guard and addendum-unwrap so callers
- * never reach through to workspace.dispose().resultAddendum directly.
+ * resolution stays lazy at run-start. The prepared Workspace and its creator's
+ * stable ID are held privately; suspend/restore preserve that ownership while
+ * dispose remains the explicit terminal boundary.
  *
- * dispose() is idempotent — a workspace can outlive the run that prepared it
- * (a child holding it for a resume), so more than one lifecycle edge may reach
- * for it — and it deliberately does NOT catch errors: the best-effort
- * try/catch belongs at the call site, preserving the per-caller semantics.
+ * dispose() is idempotent, and lifecycle failures deliberately propagate: the
+ * best-effort policy belongs at each call site rather than inside this owner.
  */
 
 import type { PersistedWorkspace } from "#src/lifecycle/subagent-persistence";
@@ -21,9 +19,10 @@ import type {
 } from "#src/lifecycle/workspace";
 import { WorkspaceRestoreError } from "#src/lifecycle/workspace";
 
-/** Owns the child workspace lifecycle: prepare at run-start, dispose at run-end. */
+/** Owns prepare, suspend, restore, and terminal disposal for one child workspace. */
 export class WorkspaceBracket {
 	private prepared?: Workspace;
+	private preparedProviderId?: string;
 	private persisted?: PersistedWorkspace;
 	private disposedWorkspace = false;
 
@@ -62,6 +61,7 @@ export class WorkspaceBracket {
 		if (!provider) return undefined;
 		this.prepared = await provider.prepare(ctx);
 		if (this.prepared) {
+			this.preparedProviderId = provider.id;
 			this.persisted = {
 				providerId: provider.id,
 				state: this.prepared.snapshot(),
@@ -87,6 +87,7 @@ export class WorkspaceBracket {
 
 		try {
 			this.prepared = await provider.restore(ctx, persisted.state);
+			this.preparedProviderId = provider.id;
 			this.persisted = {
 				providerId: provider.id,
 				state: this.prepared.snapshot(),
@@ -114,16 +115,17 @@ export class WorkspaceBracket {
 		const workspace = this.prepared;
 		if (!workspace) return "";
 
-		const provider = this.resolveProvider();
-		if (!provider) {
+		const providerId = this.preparedProviderId;
+		if (!providerId) {
 			throw new WorkspaceRestoreError(
 				"incompatible",
-				"The active workspace provider was unregistered before suspension",
+				"The live workspace has no preparing provider identity",
 			);
 		}
 		const suspended = workspace.suspend(outcome);
 		this.prepared = undefined;
-		this.persisted = { providerId: provider.id, state: suspended.state };
+		this.preparedProviderId = undefined;
+		this.persisted = { providerId, state: suspended.state };
 		return suspended.resultAddendum ?? "";
 	}
 
@@ -147,6 +149,7 @@ export class WorkspaceBracket {
 			return "";
 		}
 		this.prepared = undefined;
+		this.preparedProviderId = undefined;
 		this.persisted = undefined;
 		this.disposedWorkspace = true;
 		return workspace.dispose(outcome)?.resultAddendum ?? "";
