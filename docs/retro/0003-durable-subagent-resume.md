@@ -43,3 +43,19 @@ Reconciled the fork's transcript-viewer abort affordance with the upstream non-o
 - A provider-owned opaque JSON checkpoint keeps Git policy out of the core while still allowing stable `unavailable` and `incompatible` refusals.
 - Linking `pi-subagents-worktrees` to the local core requires its typecheck to build the core's ignored declaration bundle first on a clean checkout.
 - One dynamic-import type assertion consistently consumed Vitest's per-test timeout after linking the fork SDK; a static namespace import moved module transformation outside the timed test without weakening the assertion.
+
+## Stage: Pre-completion review (2026-09-14T09:34:59Z)
+
+### Session summary
+
+Completed three review-and-fix rounds with the same resumable reviewer `54cb1f7f-fbf8-452`.
+The final review passed all six acceptance criteria after asynchronous parent-transition guards and live tombstone lineage filtering closed the two remaining sibling-visibility races.
+The reviewer independently passed the complete repository suite at 6,867 tests, package and repository checks, lint, dead-code analysis, packed public types, and Mermaid rendering.
+
+### Observations
+
+- Registry projection alone cannot enforce branch privacy because Pi updates its live leaf before asynchronous `session_tree` handlers finish; records and tombstones must both consult the live ancestry at every public lookup.
+- Session and workspace restoration are preflight work, not resumed execution; navigation waits for the preflight, then the manager revalidates lineage before permitting a turn.
+- A workspace reconstructed before a child JSONL reopen failure must be suspended again immediately so no live checkout remains without an owning turn.
+- Process-global child lifecycle registration requires balanced `session-created` and `disposed` events even when parent-facing events are suppressed after a branch change.
+- Mutation checks proved the new race tests fail when live record filtering, post-restore revalidation, workspace resuspension, session-switch waiting, or tombstone filtering is removed.
