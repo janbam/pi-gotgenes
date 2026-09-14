@@ -358,14 +358,15 @@ src/
 │   └── session-dir.ts              session directory derivation
 │
 ├── lifecycle/                      agent execution and state tracking
-│   ├── subagent-manager.ts         collection manager + observer wiring + session-retention sweep (consumption-aware; an unanswered question holds the safety cap); the resume choke point, refusing from the record's own predicate and reporting a discriminated outcome, so every front door declines the same resumes
-│   ├── create-subagent-session.ts  assembly factory: session creation, spawn-tool denylist, core child-tool install, binding
+│   ├── subagent-manager.ts         active parent-lineage cache + observer wiring + memory-retention sweep; activates durable records, preserves sibling-branch records, and lazily restores at the resume choke point
+│   ├── subagent-persistence.ts     versioned session-global registry: durable child metadata, branch-ancestry filtering, hidden sibling preservation, and deletion tombstones
+│   ├── create-subagent-session.ts  shared child activation pipeline over fresh allocation or exact persisted SessionManager reopening
 │   ├── subagent-session.ts         born-complete child session: turn loop, steer, shutdown-then-dispose teardown
 │   ├── turn-limits.ts              normalizeMaxTurns (turn-count policy)
 │   ├── subagent.ts                 owns full execution lifecycle (run, resume, abort, steer, wait-until-settled); a teardown with no result text to carry its addendum records it as a notice and announces one produced after delivery; answers why a resume would be refused (resumeRefusal, including a live run), which the resume choke point and every result carrier read rather than re-deriving; reports a resume's start as well as its end
 │   ├── subagent-state.ts           lifecycle status + metrics + result-delivery value object (transitions, accumulators, classification predicates); delivery carries a revocable carrier claim, a one-way consumption latch, and a per-run update ledger that renders only what no announcement delivered
 │   ├── run-listeners.ts            per-run observer-unsub and signal-detach handles
-│   ├── workspace-bracket.ts        child workspace prepare/dispose lifecycle; idempotent dispose, reports a torn-down workspace
+│   ├── workspace-bracket.ts        live/suspended/disposed workspace state machine; persists provider JSON, restores only through the matching provider, and reserves disposal for explicit deletion
 │   ├── concurrency-limiter.ts       background admission gate: schedules run thunks FIFO against the limit
 │   ├── parent-snapshot.ts          immutable spawn-time parent state, including the parent's portable prompt parts rendered from Pi's own composition order
 │   ├── child-lifecycle.ts          child-execution lifecycle event publisher
@@ -452,8 +453,9 @@ They declare this package as an optional peer dependency and use dynamic import 
 - `child-lifecycle` — publishes the child-execution lifecycle (`spawning`, `session-created` before `bindExtensions()`, `bound` after it resolves, `completed`, `disposed`) on `pi.events`.
   Reactive consumers subscribe: `@gotgenes/pi-permission-system` registers each child session on `session-created`, audits it for a permission node of its own on `bound`, and unregisters it on `disposed`.
   This replaced the former outbound `permission-bridge` (#261, [ADR-0002]) — the core no longer looks up a named consumer.
-- `workspace` — the single generative seam (#262, [ADR-0002]): a registered `WorkspaceProvider` supplies a child's cwd plus bracketed `dispose()` at run-start.
-  With no provider, children run in the parent cwd (default unchanged); the git worktree strategy lives behind this seam in `@gotgenes/pi-subagents-worktrees` (#263, the seam's first consumer).
+- `subagent-persistence` — the session-global registry under `@gotgenes/pi-subagents`, whose spawn-leaf anchors restore `/tree` locality while preserving inherited ancestor records across compaction, continuation, reopen, and session switching ([ADR-0010]).
+- `workspace` — the single generative seam (#262, [ADR-0002]): a registered `WorkspaceProvider` supplies a child's cwd and owns opaque snapshot/suspend/restore/dispose state.
+  With no provider, children run in the parent cwd; the resumable git worktree strategy lives behind this seam in `@gotgenes/pi-subagents-worktrees` (#263, [ADR-0010]).
 - `session-config` — pure configuration assembler (called by `createSubagentSession`).
 - `SubagentRuntime` — session-scoped state bag with methods.
 - `ParentSnapshot` — immutable snapshot of parent session state, captured once at spawn time.
@@ -622,7 +624,7 @@ The observational surface then carries only fire-and-forget broadcasts of immuta
 - **Package-extension exclusion** — filter the child's package view by the `excludedExtensionPackages` setting before resource loading, so an excluded package's extensions are never imported in children (#696).
   Resolved at the composition root; the assembly factory receives a ready-made settings view and holds no policy.
 - **Lifecycle events** — emit awaited, ordered events when child sessions spawn, are created, complete, and are disposed.
-- **Workspace provider seam** — accept a registered `WorkspaceProvider` and consult it for the child's cwd; default to the parent's cwd when none is registered.
+- **Workspace provider seam** — accept one identified `WorkspaceProvider`, persist only its opaque JSON checkpoint, reconstruct it before child-session reopening, and default fresh children to the parent's cwd when none is registered.
 - **Service API** — publish `SubagentsService` via `Symbol.for()` for cross-extension access.
 
 ### Responsibilities removed from the core
@@ -639,7 +641,7 @@ These policy and environment concerns were removed so the core stays narrow; eac
 In the target state, pi-subagents publishes events and a provider seam; other packages hook in:
 
 - **pi-permission-system** (observational) subscribes to child-session lifecycle events, detects subagent execution context in the child, and gates tool calls at runtime.
-- **pi-subagents-worktrees** (generative) registers a `WorkspaceProvider` that prepares a git worktree at run-start and tears it down after, supplying the child's cwd.
+- **pi-subagents-worktrees** (generative) registers a `WorkspaceProvider` that prepares a git worktree, checkpoints its exact revision at every terminal edge, removes the live checkout, and reconstructs the same path before resume.
 - **pi-subagents-ui** (future, under reconsideration — see the [first-principles refinement](#first-principles-refinement-and-the-deeper-target)) subscribes to the broadcast and the query/behavior interfaces; the conversation viewer and `/agents` menu were removed in Phase 19 per [ADR-0004]; the surviving UI (widget, session navigator, settings command) stays in-core.
 - **Any future extension** (OTel, auditing, cost tracking) subscribes to the same events without pi-subagents knowing.
 
@@ -1556,4 +1558,5 @@ The upstream test suite is run periodically as a regression canary for the sessi
 [ADR-0004]: ../decisions/0004-reconsider-ui-direction.md
 [ADR-0006]: ../decisions/0006-inherited-prompt-is-identity-only.md
 [ADR-0008]: ../decisions/0008-inherited-region-is-shared-parts.md
+[ADR-0010]: ../decisions/0010-durable-resume-follows-parent-lineage.md
 [its ADR 0014]: https://github.com/gotgenes/pi-packages/blob/main/packages/pi-permission-system/docs/decisions/0014-tool-surface-is-node-local-prose.md

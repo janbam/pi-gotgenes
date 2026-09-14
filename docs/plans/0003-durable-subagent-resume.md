@@ -112,7 +112,7 @@ Missing repositories, revisions, or providers fail closed; the core never falls 
 - Both package READMEs and `packages/pi-subagents/docs/configuration.md` describe durable IDs, lineage, memory-only retention, and workspace restoration failures.
 - `packages/pi-subagents/docs/architecture/architecture.md` records the authoritative registry and activation lifecycle.
 - A focused ADR records session-global registry ownership, ancestry filtering, and the suspend/restore workspace contract.
-- `pi-subagents` develops against Pi `0.85.1`, the first fork version exposing session-global state; local validation links the three Pi packages from `/home/jan/src/pi-mono` without committing machine-specific paths.
+- `pi-subagents` develops against Pi `0.85.1`, the first fork version exposing session-global state; its three Pi development dependencies use relative links to the sibling `/home/jan/src/pi-mono` checkout, as required for this fork-only API.
 
 ## TDD Order
 

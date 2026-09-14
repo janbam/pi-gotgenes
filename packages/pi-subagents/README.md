@@ -21,8 +21,8 @@ Run them in foreground or background, steer them mid-run, resume completed sessi
 - **Session transcripts** — open any subagent's full session transcript (running or with its session released) in pi's native read-only viewer via `/subagents:sessions`
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
-- **Session resume** — pick up where an agent left off, preserving full conversation context.
-  An agent given an isolated workspace by a `WorkspaceProvider` is resumable while that workspace is live — which, for an agent that ended its turn with a question, lasts until you answer it
+- **Durable session resume** — pick up the same agent ID after parent compaction, continuation, reopening, or switching away and back, preserving its full child transcript and effective runtime configuration.
+  Isolated workspaces are checkpointed and reconstructed by their matching `WorkspaceProvider` before the child session reopens
 - **Ask-back** — an agent that needs information only you have calls `ask_parent` and ends its turn, and every result surfaces the question with the exact `resume` call that answers it; once that agent can no longer be resumed, the result says so and why instead of naming a call that would be refused
 - **Mid-run updates** — an agent that finds something material calls `notify_parent` and keeps working; the message arrives on its own while you are idle and that agent is still running, and otherwise rides that agent's own result, so you hear it exactly once and never as a stale prompt to steer an agent that has finished
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
@@ -209,8 +209,13 @@ It receives the standard pair of session lifecycle events:
 | `session_start`    | Extensions are bound, before the child's first turn | `"startup"` |
 | `session_shutdown` | The child session is disposed                       | `"quit"`    |
 
-Disposal happens when the retention window for a finished agent expires, when completed records are cleared at session start or switch, when the parent session shuts down, or when child extension binding fails partway.
-It does **not** happen the moment an agent finishes: the session is retained so the agent can be resumed, per the `consumedSessionRetentionMinutes` and `unconsumedSessionRetentionMinutes` settings above.
+The two retention windows govern only the heavy in-memory child session.
+When one expires, the SDK session is disposed but its JSONL transcript, effective resume configuration, original ID, and suspended workspace checkpoint remain in the parent session's durable registry.
+Resuming lazily reopens those resources.
+
+Durable records live for the parent-session lineage rather than a wall-clock TTL.
+Parent compaction and session navigation do not delete them; deleting the parent session ends their lifetime.
+An explicit record deletion leaves a branch-scoped tombstone so a later resume returns `deleted` instead of degrading to `unknown-agent`.
 
 The shutdown event is dispatched and awaited **before** the child's `AgentSession` is disposed, so a handler still has a live context and can close what it opened — stdio subprocesses, sockets, timers, file handles.
 Each child's shutdown is bounded: a handler that never resolves is abandoned after a few seconds and disposal proceeds, so one misbehaving extension cannot stall the parent's teardown or Pi's exit.
@@ -342,15 +347,18 @@ A new field is therefore a minor release; use a cast or a `Partial<>` for a test
 A caller that does not need the outcome can ignore the promise.
 
 It never throws and never rejects.
-A resume that could not start resolves to `{ kind: "refused", reason }` instead, promptly — the checks are synchronous and no turn loop runs:
+A resume that could not start resolves to `{ kind: "refused", reason }` instead and no turn loop runs:
 
-| `reason`             | Meaning                                                         |
-| -------------------- | --------------------------------------------------------------- |
-| `unknown-agent`      | No record answers to that id (records are cleared per session)  |
-| `still-running`      | The agent has not settled; wait, or `steer` it while it runs    |
-| `no-session`         | The agent never had a session to continue                       |
-| `session-released`   | Its session was released after the retention window             |
-| `workspace-disposed` | Its isolated workspace is gone, so a resume cannot re-enter it  |
+| `reason`             | Meaning                                                                  |
+| -------------------- | ------------------------------------------------------------------------ |
+| `unknown-agent`      | No record or tombstone with that ID belongs to the active parent lineage |
+| `deleted`            | That lineage explicitly deleted the durable handle                       |
+| `still-running`      | The agent has not settled; wait, or `steer` it while it runs             |
+| `no-session`         | The agent never had a session to continue                                |
+| `session-released`   | Its live session was released without a persisted transcript             |
+| `workspace-disposed` | Its durable workspace handle was explicitly disposed                     |
+| `unavailable`        | A persisted transcript, repository, revision, or workspace is missing    |
+| `incompatible`       | Persisted state cannot be honored by the current model/runtime/provider  |
 
 A resumed run that _fails_ is still `{ kind: "resumed" }`; the snapshot carries `status: "error"` and the message.
 Refused means nothing started.

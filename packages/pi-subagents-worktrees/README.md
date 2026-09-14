@@ -4,7 +4,7 @@
 
 Git worktree isolation for [`@gotgenes/pi-subagents`](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents).
 
-This extension registers a `WorkspaceProvider` with the subagents core: opted-in agents run in a temporary git worktree (an isolated copy of the repo), and any changes they make are saved to a branch when they finish.
+This extension registers a resumable `WorkspaceProvider` with the subagents core: opted-in agents run in a temporary git worktree, and every terminal run leaves a checkpoint from which the same agent ID can reconstruct its checkout.
 Worktrees are one _workspace strategy_, not core behavior — so the git plumbing lives here, outside the minimal subagents core (see [ADR-0002] in the pi-subagents package).
 
 ## Install
@@ -42,10 +42,13 @@ An agent type not in `worktreeAgents` runs in the parent working directory, exac
 ## Behavior
 
 - A child whose agent type is listed gets a fresh detached worktree at `HEAD` before it runs.
-- When the child ends its turn with a question for you, the worktree is kept so the child can be resumed into it; cleanup happens when the resumed child finishes instead.
-  A question you never answer keeps the worktree until the subagents core releases the child's session.
-- When the child finishes with no changes, the worktree is removed.
-- When the child finishes with changes, they are committed to a branch (`pi-agent-<id>`), and the child's result gains a note: `Changes saved to branch \`<branch>\`. Merge with: \`git merge <branch>\``.
+- When a child turn ends, its live checkout is suspended even when it asked a question.
+  A clean checkout records its exact revision; a dirty checkout commits every change to a rescue branch (`pi-agent-<id>`).
+  The checkout is then removed, so completed agents do not accumulate live worktrees.
+- Resuming the same agent recreates a detached worktree at the original path and exact checkpoint revision before its child transcript reopens.
+  Dirty checkpoint content is therefore present when the conversation continues.
+- If a process crash leaves the registered worktree on disk, restoration reuses it verbatim instead of resetting it, preserving uncommitted files.
+- A dirty suspension adds this note to the child's result: `Changes saved to branch \`<branch>\`. Merge with: \`git merge <branch>\``.
 - If a commit hook rejects that commit, it is retried once with `--no-verify`, because the commit exists to rescue work the child already did and a rejecting hook would otherwise cost you that work.
   Files a hook rewrote before failing are re-staged, so a formatter's corrections are committed rather than discarded.
   The note then gains a second line reading `Commit hooks were bypassed to save this work — review the commit before merging.`
@@ -54,8 +57,7 @@ An agent type not in `worktreeAgents` runs in the parent working directory, exac
 - If worktree creation fails for an opted-in agent (not a git repo, no commits yet, or `git worktree add` fails), the child run **fails** with an explanatory error rather than silently running unisolated.
 - At the start of every session with a UI, any rescue worktrees still on disk are named in a warning, so a preserved worktree is not forgotten once the child's result scrolls out of view.
 - At that same point, any `pi-agent-` branch whose work is not yet on `HEAD` is named in a second warning.
-  A worktree torn down after the child's result already reached you — a question you never answered, or a session that ended — still commits the child's work to a branch, but there is no result left to print the note into.
-  The warning is how that branch is found again.
+  A checkpoint branch remains a rescue artifact even though the same agent can reconstruct and continue from its commit.
 
 ## Recovering rescue branches
 
@@ -85,10 +87,10 @@ That flag was removed from the core; install this package and list the agent typ
 
 **Purpose.**
 The subagents core asks a `WorkspaceProvider` where each child session should run.
-This package is one answer: opted-in agents get a temporary git worktree, and whatever they produce is rescued to a branch when they finish.
+This package is one answer: opted-in agents get a temporary git worktree, and every terminal turn produces a reconstructible checkpoint.
 
 **In scope.**
-The git plumbing bracketing a child run, not losing the child's work when cleanup fails, and making a preserved worktree discoverable and removable.
+The git plumbing bracketing a child run, durable suspend/restore checkpoints, not losing work when cleanup fails, and making a preserved worktree discoverable and removable.
 
 **Non-goals.**
 

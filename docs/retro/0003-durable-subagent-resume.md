@@ -26,3 +26,20 @@ The selected design uses Jan's Pi session-global JSON state as the authoritative
 
 - Large-file decomposition in `subagent.ts` and `subagent-manager.ts` was rejected as unrelated cleanup; only boundaries directly needed by durable hydration should change.
 - Generic persistence adapters, migration frameworks, and provider chains were rejected as speculative abstractions for one registry and one active workspace provider.
+
+## Stage: Implementation — TDD (2026-09-14T01:09:45Z)
+
+### Session summary
+
+Implemented a session-global durable registry, active-branch ancestry filtering, lazy child-session reopening, stable tombstones and restoration failures, and resumable workspace checkpoints.
+Extended the worktree provider to commit dirty terminal state, remove idle checkouts, reconstruct the same path and revision, and preserve crash-left live worktrees.
+Reconciled the fork's transcript-viewer abort affordance with the upstream non-overlay pane, keeping the architectural boundary while restoring the user-visible action.
+
+### Observations
+
+- Separating fresh session allocation from shared child activation made persisted reopening a narrow factory change instead of a second assembly path.
+- The manager must preserve hidden sibling records on every write because Pi's session-global state intentionally remains unchanged across `/tree` navigation.
+- Workspace restoration must finish before `SessionManager.open()` so the persisted effective cwd exists when the child SDK session binds.
+- A provider-owned opaque JSON checkpoint keeps Git policy out of the core while still allowing stable `unavailable` and `incompatible` refusals.
+- Linking `pi-subagents-worktrees` to the local core requires its typecheck to build the core's ignored declaration bundle first on a clean checkout.
+- One dynamic-import type assertion consistently consumed Vitest's per-test timeout after linking the fork SDK; a static namespace import moved module transformation outside the timed test without weakening the assertion.

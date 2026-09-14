@@ -1,13 +1,12 @@
 /**
  * workspace-provider.ts — git worktree implementation of the pi-subagents
- * WorkspaceProvider seam (ADR 0002, Phase 16 Step 3).
+ * WorkspaceProvider seam (ADR 0002, Phase 16 Step 3; ADR 0010).
  *
  * The core consults a registered provider for every child run. This provider
- * isolates a child in a git worktree only when its agent type is opted in via
- * `worktreeAgents`; for any other agent it returns `undefined`, leaving the
- * child to run in the parent cwd. On worktree-creation failure for an opted-in
- * agent it throws, failing the run loudly rather than silently running
- * unisolated (preserving the core's former strict behavior).
+ * isolates opted-in children in reconstructible git worktrees. Every terminal
+ * turn checkpoints the exact revision and removes the checkout; resume restores
+ * the same path before the child transcript reopens. Non-opted-in children run
+ * in the parent cwd, while preparation or restoration failures fail closed.
  */
 
 import { tmpdir } from "node:os";
@@ -55,7 +54,7 @@ class WorktreeRestoreError extends Error {
   }
 }
 
-/** A prepared git worktree plus its bracketed teardown. Born complete. */
+/** A live git worktree that can produce a durable checkpoint or be deleted. */
 class WorktreeWorkspace implements Workspace {
   constructor(
     private readonly repoCwd: string,
@@ -131,7 +130,7 @@ class WorktreeWorkspace implements Workspace {
   }
 }
 
-/** Registers a git worktree per opted-in agent type; runs others in the parent cwd. */
+/** Owns resumable git worktrees for opted-in agent types. */
 export class WorktreeWorkspaceProvider implements WorkspaceProvider {
   readonly id = PROVIDER_ID;
 

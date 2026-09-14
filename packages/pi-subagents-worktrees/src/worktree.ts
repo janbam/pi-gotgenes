@@ -2,8 +2,8 @@
  * worktree.ts — Git worktree isolation for subagents.
  *
  * Creates a temporary git worktree so an agent works on an isolated copy of the repo.
- * On completion, if no changes were made, the worktree is cleaned up.
- * If changes exist, a branch is created and returned in the result.
+ * Every terminal turn records the checkout revision, commits dirty work to a
+ * rescue branch, and removes the checkout so it can be recreated on resume.
  * A worktree is only ever removed once its outcome is certain: when cleanup
  * fails partway, it is left on disk so the agent's work stays recoverable.
  *
@@ -95,7 +95,7 @@ export function createWorktree(
 }
 
 /**
- * Clean up a worktree after agent completion.
+ * Checkpoint and remove a worktree after an agent turn.
  * - If no changes: remove the worktree entirely.
  * - If changes exist: commit them to a branch, then remove the worktree.
  *   A commit hook that rejects the commit is retried past with `--no-verify`.

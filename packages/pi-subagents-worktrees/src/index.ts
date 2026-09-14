@@ -4,7 +4,8 @@
  * Registers a WorkspaceProvider (ADR 0002, Phase 16 Step 3) that runs opted-in
  * subagents in a temporary git worktree. The core consults the provider for
  * every child run; this package decides which agents get a worktree (via the
- * worktreeAgents config) and brackets the run with git plumbing.
+ * worktreeAgents config), checkpoints terminal turns, and reconstructs the
+ * same checkout before resume.
  *
  * The provider is registered once at extension init via the published
  * SubagentsService, which requires @gotgenes/pi-subagents to have initialized
@@ -32,7 +33,8 @@ import { discardWorktree, pruneWorktrees } from "#src/worktree";
 export default function piSubagentsWorktrees(pi: ExtensionAPI): void {
   const config = loadWorktreesConfig(getAgentDir(), process.cwd());
 
-  // Best-effort crash recovery: clear worktrees orphaned by a prior crash.
+  // Clear stale Git metadata while retaining any crash-left checkout that a
+  // persisted workspace handle may reuse verbatim.
   pruneWorktrees(process.cwd());
 
   const service = getSubagentsService();
