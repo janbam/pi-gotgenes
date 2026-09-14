@@ -18,12 +18,16 @@ import type {
   WorkspaceDisposeResult,
   WorkspacePrepareContext,
   WorkspaceProvider,
+  WorkspaceRestoreFailure,
+  WorkspaceSuspendResult,
 } from "#src/lifecycle/workspace";
+
 
 
 // SubagentStatus is defined in the lifecycle layer (single home) and re-exported
 // here for the public API surface — mirrors the LifetimeUsage / workspace pattern.
 export type { SubagentStatus } from "#src/lifecycle/subagent";
+export { WorkspaceRestoreError } from "#src/lifecycle/workspace";
 // The resume vocabulary is re-exported for the same reason: the record owns the
 // reasons a resume is refused, and the manager adds the one that is not a fact
 // about a record.
@@ -40,6 +44,8 @@ export type {
   WorkspaceDisposeResult,
   WorkspacePrepareContext,
   WorkspaceProvider,
+  WorkspaceRestoreFailure,
+  WorkspaceSuspendResult,
 };
 
 /**

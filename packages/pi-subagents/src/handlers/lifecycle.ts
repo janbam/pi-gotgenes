@@ -1,7 +1,7 @@
 import type { SessionContext } from "#src/types";
 
 /**
- * Session lifecycle event handlers: session_start, session_before_switch, session_shutdown.
+ * Session lifecycle event handlers: start, switch, tree navigation, and shutdown.
  *
  * Extracted from index.ts so each handler can be tested in isolation
  * with mocked narrow interfaces.
@@ -9,8 +9,10 @@ import type { SessionContext } from "#src/types";
 
 /** Narrow manager interface — only the methods lifecycle handlers call. */
 export interface LifecycleManager {
-  clearCompleted(): Promise<void>;
-  abortAll(): void;
+  activate(ctx: SessionContext): void;
+  deactivate(): Promise<void>;
+  prepareTreeTransition(commonAncestorId: string | null): Promise<void>;
+  reconcileTree(ctx: SessionContext): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -37,29 +39,50 @@ export class SessionLifecycleHandler {
     private readonly unpublishService: () => void,
   ) {}
 
-  handleSessionStart(_event: unknown, ctx: unknown): Promise<void> {
-    this.runtime.setSessionContext(ctx as SessionContext);
-    return this.manager.clearCompleted();
+  handleSessionStart(_event: unknown, ctx: unknown): void {
+    const sessionContext = ctx as SessionContext;
+    this.runtime.setSessionContext(sessionContext);
+    this.manager.activate(sessionContext);
   }
 
   handleSessionBeforeSwitch(): Promise<void> {
-    return this.manager.clearCompleted();
+    return this.manager.deactivate();
+  }
+
+  /** Settle records leaving the target ancestry while the old leaf still owns side effects. */
+  handleSessionBeforeTree(event: unknown): Promise<void> {
+    const treeEvent = event as {
+      preparation: { commonAncestorId: string | null };
+    };
+    return this.manager.prepareTreeTransition(
+      treeEvent.preparation.commonAncestorId,
+    );
+  }
+
+  /** Reproject the durable registry after `/tree` selects a new ancestry. */
+  handleSessionTree(_event: unknown, ctx: unknown): Promise<void> {
+    const sessionContext = ctx as SessionContext;
+
+    // Shared-ancestor records retain their live objects; only branch visibility
+    // changes after the pre-navigation settlement boundary.
+    this.runtime.setSessionContext(sessionContext);
+    return this.manager.reconcileTree(sessionContext);
   }
 
   // Cleanup order matters:
   // 1. Unpublish service — prevent new cross-extension calls
-  // 2. Clear session context — no more session state
-  // 3. Dispose notifications — silence nudges *before* the aborts that would
+  // 2. Dispose notifications — silence nudges *before* the aborts that would
   //    raise them: no parent run is active at shutdown, so a terminal
   //    transition delivers its nudge synchronously and Pi cannot recall it
-  // 4. Abort all agents — stop running and queued work
-  // 5. Dispose manager — final cleanup, awaited so each child's extensions get
-  //    their `session_shutdown` before Pi tears the parent down (#709)
-  handleSessionShutdown(): Promise<void> {
+  // 3. Deactivate — stop, settle, persist, and release every child while the
+  //    outgoing parent session-state boundary is still available
+  // 4. Clear session context — no more parent state after deactivation
+  // 5. Dispose manager — clear its process-wide timer
+  async handleSessionShutdown(): Promise<void> {
     this.unpublishService();
-    this.runtime.clearSessionContext();
     this.disposeNotifications();
-    this.manager.abortAll();
-    return this.manager.dispose();
+    await this.manager.deactivate();
+    this.runtime.clearSessionContext();
+    await this.manager.dispose();
   }
 }

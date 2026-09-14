@@ -72,6 +72,8 @@ const RESUME_REFUSAL_CLAUSES: Record<Exclude<ResumeRefusal, "still-running">, st
 	"no-session": "it has no active session",
 	"session-released": "its session was released after its retention window",
 	"workspace-disposed": "it ran in an isolated workspace that has since been removed",
+	unavailable: "its persisted transcript or workspace is unavailable",
+	incompatible: "its persisted session is incompatible with the current runtime",
 };
 
 /**

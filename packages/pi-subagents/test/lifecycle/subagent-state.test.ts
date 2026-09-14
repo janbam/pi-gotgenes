@@ -108,6 +108,59 @@ describe("SubagentState — constructor full-value seeding", () => {
 	});
 });
 
+describe("SubagentState — durable snapshots", () => {
+	it("round-trips settled lifecycle and observation state", () => {
+		const original = new SubagentState({
+			status: "completed",
+			result: "finished",
+			pendingQuestion: "Continue?",
+			workspaceNotice: "saved",
+			startedAt: 100,
+			completedAt: 200,
+			consumedAt: 250,
+			toolUses: 3,
+			lifetimeUsage: { input: 10, output: 20, cacheWrite: 4 },
+			compactionCount: 2,
+			turnCount: 5,
+			responseText: "finished",
+		});
+
+		const restored = SubagentState.restore(original.snapshot(), 999);
+
+		expect(restored.snapshot()).toEqual(original.snapshot());
+		expect(restored.claimed).toBe(false);
+		expect(restored.runUpdates).toEqual([]);
+	});
+
+	it("normalizes an interrupted running child into a resumable stopped record", () => {
+		const interrupted = new SubagentState({
+			status: "running",
+			startedAt: 100,
+			toolUses: 3,
+			responseText: "partial provider output",
+			activeTools: ["bash"],
+		});
+
+		const restored = SubagentState.restore(interrupted.snapshot(), 500);
+
+		expect(restored.status).toBe("stopped");
+		expect(restored.completedAt).toBe(500);
+		expect(restored.responseText).toBe("");
+		expect(restored.activeTools.size).toBe(0);
+		expect(restored.toolUses).toBe(3);
+	});
+
+	it("records that an interrupted queued child never started", () => {
+		const queued = new SubagentState({ status: "queued", startedAt: 100 });
+
+		const restored = SubagentState.restore(queued.snapshot(), 500);
+
+		expect(restored.status).toBe("stopped");
+		expect(restored.stoppedWhileQueued).toBe(true);
+		expect(restored.completedAt).toBe(500);
+	});
+});
+
 describe("SubagentState — markRunning", () => {
 	it("sets status to 'running' and updates startedAt", () => {
 		const state = new SubagentState({ status: "queued", startedAt: 1000 });

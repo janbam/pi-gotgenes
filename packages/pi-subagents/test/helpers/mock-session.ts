@@ -54,6 +54,16 @@ export function createSubagentSessionStub(
 	return {
 		session,
 		outputFile,
+		resumeSpec: outputFile
+			? {
+					outputFile,
+					sessionId: "child-session-id",
+					sessionDir: "/tasks",
+					effectiveCwd: "/repo",
+					systemPrompt: "test prompt",
+					toolNames: ["read"],
+				}
+			: undefined,
 		runTurnLoop: vi.fn().mockResolvedValue({ responseText: "done", aborted: false, steered: false }),
 		resumeTurnLoop: vi.fn().mockResolvedValue("resumed"),
 		steer: vi.fn((message: string): Promise<void> => session.steer(message) as Promise<void>),

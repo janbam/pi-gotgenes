@@ -176,7 +176,9 @@ function makeStubCtx(): SessionContext {
     sessionManager: {
       getSessionFile: () => undefined,
       getSessionId: () => "stub-session",
+      getLeafId: () => null,
       getBranch: () => [],
+      getSessionState: () => undefined,
     },
   };
 }
@@ -192,6 +194,7 @@ function makeRuntimeStub(override: Partial<ServiceRuntimeLike> = {}): ServiceRun
     getSessionInfo: vi.fn(() => ({
       parentSessionFile: "/sessions/parent.jsonl",
       parentSessionId: "parent-session-123",
+      parentEntryId: "parent-entry-456",
     })),
     ...override,
   };
@@ -392,6 +395,7 @@ describe("SubagentsServiceAdapter — spawn", () => {
           parentSession: {
             parentSessionFile: "/sessions/parent.jsonl",
             parentSessionId: "parent-session-123",
+            parentEntryId: "parent-entry-456",
           },
         }),
       );
@@ -630,7 +634,13 @@ describe("SubagentsServiceAdapter — registerWorkspaceProvider", () => {
     const mgr = createManagerStub();
     mgr.registerWorkspaceProvider.mockReturnValue(disposer);
     const svc = new SubagentsServiceAdapter(mgr, vi.fn(), makeRuntimeStub());
-    const provider: WorkspaceProvider = { prepare: vi.fn(async () => undefined) };
+    const provider: WorkspaceProvider = {
+      id: "test-workspace",
+      prepare: vi.fn(async () => undefined),
+      restore: vi.fn(async () => {
+        throw new Error("workspace unavailable");
+      }),
+    };
 
     const result = svc.registerWorkspaceProvider(provider);
 

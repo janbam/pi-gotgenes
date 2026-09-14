@@ -21,6 +21,7 @@ import {
 import type { AgentConfigLookup } from "#src/config/agent-types";
 import type { ChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
+import type { PersistedSubagentSession } from "#src/lifecycle/subagent-persistence";
 import { SubagentSession } from "#src/lifecycle/subagent-session";
 import { AskParentTool, type QuestionRecorder } from "#src/session/ask-parent-tool";
 import type { EnvInfo } from "#src/session/env";
@@ -115,6 +116,12 @@ export interface EnvironmentIO {
 export interface SessionFactoryIO {
   createResourceLoader: (opts: ResourceLoaderOptions) => ResourceLoaderLike;
   createSessionManager: (cwd: string, sessionDir: string) => SessionManagerLike;
+  openSessionManager: (
+    outputFile: string,
+    sessionDir: string,
+    cwdOverride: string,
+  ) => SessionManagerLike;
+  fileExists: (path: string) => boolean;
   createSettingsManager: (cwd: string, agentDir: string) => SettingsManager;
   /**
    * Settings view the child's resource loader resolves packages from.
@@ -158,6 +165,8 @@ export interface SubagentSessionDeps {
 export interface CreateSubagentSessionParams {
   snapshot: ParentSnapshot;
   type: SubagentType;
+  /** Revalidates that asynchronous activation still belongs to the selected parent lineage. */
+  isCurrent?: () => boolean;
   /** Resolved workspace cwd; undefined → parent cwd. */
   cwd?: string;
   /** Parent session identity (file path + session ID). */
@@ -177,6 +186,58 @@ export interface CreateSubagentSessionParams {
   notifyParent?: UpdateAnnouncer;
 }
 
+/** Parameters for activating a child conversation already persisted on disk. */
+export interface RestoreSubagentSessionParams {
+  spec: PersistedSubagentSession;
+  type: SubagentType;
+  /** Revalidates that asynchronous restoration still belongs to the selected parent lineage. */
+  isCurrent?: () => boolean;
+  modelRegistry: ModelRegistry;
+  parentSessionId?: string;
+  askParent?: QuestionRecorder;
+  notifyParent?: UpdateAnnouncer;
+}
+
+/** Stable classification used by the manager's durable resume refusal. */
+export class SubagentSessionRestoreError extends Error {
+  constructor(
+    readonly reason: "unavailable" | "incompatible",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "SubagentSessionRestoreError";
+  }
+}
+
+/** Fully resolved collaborators shared by fresh creation and durable reopening. */
+interface ActivateSubagentSessionParams {
+  type: SubagentType;
+  isCurrent?: () => boolean;
+  parentSessionId: string | undefined;
+  parentContext: string | undefined;
+  sessionDir: string;
+  sessionManager: SessionManagerLike;
+  sessionSettings: SettingsManager;
+  modelRegistry: ModelRegistry;
+  model: Model<any> | undefined;
+  toolNames: string[];
+  childTools: ToolDefinition[];
+  loader: ResourceLoaderLike;
+  thinkingLevel: ThinkingLevel | undefined;
+  agentMaxTurns: number | undefined;
+  effectiveCwd: string;
+  agentDir: string;
+  resumeSpec: PersistedSubagentSession | undefined;
+}
+
+/** Settings and resource-loader objects shared by fresh and reopened children. */
+interface SessionResources {
+  agentDir: string;
+  sessionSettings: SettingsManager;
+  loader: ResourceLoaderLike;
+}
+
 /**
  * The core's own child-facing tools, built for whichever callbacks this run
  * supplied. An agent's `tools:` list is its complete capability allowlist, so
@@ -184,7 +245,9 @@ export interface CreateSubagentSessionParams {
  * core installs in every child, and neither reaches the filesystem, the shell,
  * or the network.
  */
-function buildChildTools(params: CreateSubagentSessionParams): ToolDefinition[] {
+function buildChildTools(
+  params: Pick<CreateSubagentSessionParams, "askParent" | "notifyParent">,
+): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
   if (params.askParent) tools.push(new AskParentTool(params.askParent).toToolDefinition());
   if (params.notifyParent)
@@ -207,6 +270,7 @@ export async function createSubagentSession(
   // Resolve working directory upfront - needed for detectEnv before assembly.
   const effectiveCwd = params.cwd ?? snapshot.cwd;
   const env = await deps.io.detectEnv(deps.exec, effectiveCwd);
+  assertCurrentLineage(params.isCurrent);
 
   // Assemble session configuration (synchronous, no SDK objects).
   const cfg = assembleSessionConfig(
@@ -229,29 +293,12 @@ export async function createSubagentSession(
     deps.io.assemblerIO,
   );
 
-  const agentDir = deps.io.getAgentDir();
-  const sessionSettings = deps.io.createSettingsManager(cfg.effectiveCwd, agentDir);
-  const loaderSettings = deps.io.createLoaderSettingsManager(sessionSettings);
-
-  // Children inherit the parent's skills and every extension the composition
-  // root did not exclude (#696).
-  //
-  // Suppress AGENTS.md/CLAUDE.md and APPEND_SYSTEM.md - upstream's
-  // buildSystemPrompt() re-appends both AFTER systemPromptOverride, which
-  // would defeat prompt_mode: replace. Parent context, if wanted, reaches the
-  // subagent via prompt_mode: append (parentSystemPrompt is embedded in
-  // systemPromptOverride) or inherit_context (conversation).
-  const loader = deps.io.createResourceLoader({
-    cwd: cfg.effectiveCwd,
-    agentDir,
-    settingsManager: loaderSettings,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-    systemPromptOverride: () => cfg.systemPrompt,
-    appendSystemPromptOverride: () => [],
-  });
-  await loader.reload();
+  const resources = await loadSessionResources(
+    cfg.effectiveCwd,
+    cfg.systemPrompt,
+    deps,
+  );
+  assertCurrentLineage(params.isCurrent);
 
   // Create a persisted SessionManager so transcripts are written in Pi's
   // official JSONL format. Falls back to a temp directory when the parent
@@ -259,30 +306,203 @@ export async function createSubagentSession(
   const sessionDir = deps.io.deriveSessionDir(params.parentSession?.parentSessionFile, cfg.effectiveCwd);
   const sessionManager = deps.io.createSessionManager(cfg.effectiveCwd, sessionDir);
   sessionManager.newSession({ parentSession: params.parentSession?.parentSessionId });
-  const sessionId = sessionManager.getSessionId();
 
   const childTools = buildChildTools(params);
-  const { session } = await deps.io.createSession({
-    cwd: cfg.effectiveCwd,
+  const outputFile = sessionManager.getSessionFile();
+  const resumeSpec: PersistedSubagentSession | undefined = outputFile
+    ? {
+        outputFile,
+        sessionId: sessionManager.getSessionId(),
+        sessionDir,
+        effectiveCwd: cfg.effectiveCwd,
+        systemPrompt: cfg.systemPrompt,
+        toolNames: [...cfg.toolNames],
+        model: cfg.model
+          ? { provider: cfg.model.provider, id: cfg.model.id }
+          : undefined,
+        thinkingLevel: cfg.thinkingLevel,
+        agentMaxTurns: cfg.agentMaxTurns,
+        parentContext: snapshot.parentContext,
+      }
+    : undefined;
+  return activateSubagentSession(
+    {
+      type,
+      isCurrent: params.isCurrent,
+      parentSessionId,
+      parentContext: snapshot.parentContext,
+      sessionDir,
+      sessionManager,
+      sessionSettings: resources.sessionSettings,
+      modelRegistry: snapshot.modelRegistry,
+      model: cfg.model,
+      toolNames: cfg.toolNames,
+      childTools,
+      loader: resources.loader,
+      thinkingLevel: cfg.thinkingLevel,
+      agentMaxTurns: cfg.agentMaxTurns,
+      effectiveCwd: cfg.effectiveCwd,
+      agentDir: resources.agentDir,
+      resumeSpec,
+    },
+    deps,
+  );
+}
+
+/** Reopen one persisted child conversation with its exact effective configuration. */
+export async function restoreSubagentSession(
+  params: RestoreSubagentSessionParams,
+  deps: SubagentSessionDeps,
+): Promise<SubagentSession> {
+  const { spec } = params;
+  if (!deps.io.fileExists(spec.outputFile)) {
+    throw new SubagentSessionRestoreError(
+      "unavailable",
+      `Child transcript is missing: ${spec.outputFile}`,
+    );
+  }
+
+  // Resolve exact identity only; fuzzy fallback could silently continue with a
+  // different model after a registry or provider configuration change.
+  const model = resolvePersistedModel(spec, params.modelRegistry);
+  const resources = await loadSessionResources(
+    spec.effectiveCwd,
+    spec.systemPrompt,
+    deps,
+  );
+  assertCurrentLineage(params.isCurrent);
+
+  let sessionManager: SessionManagerLike;
+  try {
+    sessionManager = deps.io.openSessionManager(
+      spec.outputFile,
+      spec.sessionDir,
+      spec.effectiveCwd,
+    );
+  } catch (cause) {
+    throw new SubagentSessionRestoreError(
+      "incompatible",
+      `Child transcript cannot be opened: ${spec.outputFile}`,
+      { cause },
+    );
+  }
+  if (sessionManager.getSessionId() !== spec.sessionId) {
+    throw new SubagentSessionRestoreError(
+      "incompatible",
+      `Child transcript identity changed: expected ${spec.sessionId}`,
+    );
+  }
+
+  return activateSubagentSession(
+    {
+      type: params.type,
+      isCurrent: params.isCurrent,
+      parentSessionId: params.parentSessionId,
+      parentContext: spec.parentContext,
+      sessionDir: spec.sessionDir,
+      sessionManager,
+      sessionSettings: resources.sessionSettings,
+      modelRegistry: params.modelRegistry,
+      model,
+      toolNames: [...spec.toolNames],
+      childTools: buildChildTools(params),
+      loader: resources.loader,
+      thinkingLevel: spec.thinkingLevel,
+      agentMaxTurns: spec.agentMaxTurns,
+      effectiveCwd: spec.effectiveCwd,
+      agentDir: resources.agentDir,
+      resumeSpec: spec,
+    },
+    deps,
+  );
+}
+
+/** Build settings and load the exact persisted system prompt for one child. */
+async function loadSessionResources(
+  effectiveCwd: string,
+  systemPrompt: string,
+  deps: SubagentSessionDeps,
+): Promise<SessionResources> {
+  const agentDir = deps.io.getAgentDir();
+  const sessionSettings = deps.io.createSettingsManager(effectiveCwd, agentDir);
+  const loaderSettings = deps.io.createLoaderSettingsManager(sessionSettings);
+
+  // Children inherit the parent's skills and every extension the composition
+  // root did not exclude (#696). Context files stay suppressed because the
+  // effective prompt already contains the selected inheritance policy.
+  const loader = deps.io.createResourceLoader({
+    cwd: effectiveCwd,
     agentDir,
-    sessionManager,
-    settingsManager: sessionSettings,
-    modelRegistry: snapshot.modelRegistry,
-    model: cfg.model,
-    tools: [...cfg.toolNames, ...childTools.map((tool) => tool.name)],
-    customTools: childTools,
+    settingsManager: loaderSettings,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    systemPromptOverride: () => systemPrompt,
+    appendSystemPromptOverride: () => [],
+  });
+  await loader.reload();
+  return { agentDir, sessionSettings, loader };
+}
+
+/** Resolve a persisted exact model or reject an environment that cannot honor it. */
+function resolvePersistedModel(
+  spec: PersistedSubagentSession,
+  registry: ModelRegistry,
+): Model<any> | undefined {
+  if (!spec.model) return undefined;
+  const model = registry.find(spec.model.provider, spec.model.id);
+  const available = registry.getAvailable?.() ?? registry.getAll();
+  const isAvailable = available.some(
+    (candidate) =>
+      candidate.provider === spec.model?.provider && candidate.id === spec.model.id,
+  );
+  if (model && isAvailable) return model;
+  throw new SubagentSessionRestoreError(
+    "incompatible",
+    `Persisted model is unavailable: ${spec.model.provider}/${spec.model.id}`,
+  );
+}
+
+/** Activate, bind, and publish one child whose session manager is already selected. */
+async function activateSubagentSession(
+  params: ActivateSubagentSessionParams,
+  deps: SubagentSessionDeps,
+): Promise<SubagentSession> {
+  const sessionId = params.sessionManager.getSessionId();
+
+  // Keep child protocol tools inside both the allowlist and custom definitions;
+  // the SDK drops a custom tool whose name is absent from the allowlist.
+  const { session } = await deps.io.createSession({
+    cwd: params.effectiveCwd,
+    agentDir: params.agentDir,
+    sessionManager: params.sessionManager,
+    settingsManager: params.sessionSettings,
+    modelRegistry: params.modelRegistry,
+    model: params.model,
+    tools: [...params.toolNames, ...params.childTools.map((tool) => tool.name)],
+    customTools: params.childTools,
     excludeTools: EXCLUDED_TOOL_NAMES,
-    resourceLoader: loader,
-    thinkingLevel: cfg.thinkingLevel,
+    resourceLoader: params.loader,
+    thinkingLevel: params.thinkingLevel,
   });
 
+  // The SDK session was allocated across an async boundary. If `/tree` moved
+  // meanwhile, dispose it before publishing the registration event that would
+  // make this old-sibling child externally observable.
+  if (params.isCurrent && !params.isCurrent()) {
+    session.dispose();
+    throw new Error("Subagent no longer belongs to the active parent lineage");
+  }
+
   const subagentSession = new SubagentSession(session, {
-    outputFile: sessionManager.getSessionFile(),
+    outputFile: params.sessionManager.getSessionFile(),
     sessionId,
-    sessionDir,
-    agentName: type,
-    agentMaxTurns: cfg.agentMaxTurns,
-    parentContext: snapshot.parentContext,
+    sessionDir: params.sessionDir,
+    agentName: params.type,
+    agentMaxTurns: params.agentMaxTurns,
+    parentContext: params.parentContext,
+    isCurrent: params.isCurrent,
+    resumeSpec: params.resumeSpec,
     lifecycle: deps.lifecycle,
   });
 
@@ -291,7 +511,7 @@ export async function createSubagentSession(
   // entry in place for the first permission check during child extension
   // initialization. The event bus dispatches synchronously, so a synchronous
   // subscriber completes before this returns.
-  deps.lifecycle.sessionCreated({ sessionId, parentSessionId });
+  deps.lifecycle.sessionCreated({ sessionId, parentSessionId: params.parentSessionId });
 
   try {
     // Bind extensions so that session_start fires and extensions can initialize.
@@ -304,10 +524,24 @@ export async function createSubagentSession(
     throw err;
   }
 
+  // Binding may itself cross the branch commit. Preserve the created/disposed
+  // protocol pair for cleanup, but never publish bound or start the child run.
+  if (params.isCurrent && !params.isCurrent()) {
+    await subagentSession.dispose();
+    throw new Error("Subagent no longer belongs to the active parent lineage");
+  }
+
   // Every child session_start handler has now run, so this is the first — and
   // only — moment a parent can observe what the child's extensions installed.
   // Deliberately outside the try above: a child whose binding threw never ran.
-  deps.lifecycle.bound({ sessionId, parentSessionId });
+  deps.lifecycle.bound({ sessionId, parentSessionId: params.parentSessionId });
 
   return subagentSession;
+}
+
+/** Refuse asynchronous activation after its record leaves the selected lineage. */
+function assertCurrentLineage(isCurrent: (() => boolean) | undefined): void {
+  if (isCurrent && !isCurrent()) {
+    throw new Error("Subagent no longer belongs to the active parent lineage");
+  }
 }

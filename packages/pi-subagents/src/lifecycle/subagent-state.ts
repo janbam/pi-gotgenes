@@ -56,8 +56,9 @@ interface RunUpdate {
 	announced: boolean;
 }
 
-export interface SubagentStateInit {
-	status?: SubagentStatus;
+/** Serializable state retained by the parent registry between Pi processes. */
+export interface SubagentStateSnapshot {
+	status: SubagentStatus;
 	result?: string;
 	/** The question the agent ended its turn with — an outcome fact, like result. */
 	pendingQuestion?: string;
@@ -66,18 +67,21 @@ export interface SubagentStateInit {
 	error?: string;
 	/** Whether the agent was stopped before the limiter ever admitted it. */
 	stoppedWhileQueued?: boolean;
-	startedAt?: number;
+	startedAt: number;
 	completedAt?: number;
 	/** Time the parent collected the outcome; undefined = obligation still open. */
 	consumedAt?: number;
-	// Stats — seed a populated value without replaying the accumulation methods
-	toolUses?: number;
-	lifetimeUsage?: LifetimeUsage;
-	compactionCount?: number;
-	// Live activity — activeTools is seeded by name (each entry calls addActiveTool)
-	turnCount?: number;
+	toolUses: number;
+	lifetimeUsage: LifetimeUsage;
+	compactionCount: number;
+	turnCount: number;
+	responseText: string;
+}
+
+/** Optional seeds accepted when constructing fresh or restored state. */
+export interface SubagentStateInit extends Partial<SubagentStateSnapshot> {
+	/** Live tool names restored through mutation so their generated IDs remain process-local. */
 	activeTools?: string[];
-	responseText?: string;
 }
 
 export class SubagentState {
@@ -185,6 +189,40 @@ export class SubagentState {
 		for (const name of init.activeTools ?? []) {
 			this.addActiveTool(name);
 		}
+	}
+
+	/** Restore persisted state, converting interrupted process-local work into a settled record. */
+	static restore(snapshot: SubagentStateSnapshot, recoveredAt = Date.now()): SubagentState {
+		const interrupted = isActiveStatus(snapshot.status);
+		return new SubagentState({
+			...snapshot,
+			status: interrupted ? "stopped" : snapshot.status,
+			completedAt: interrupted ? recoveredAt : snapshot.completedAt,
+			stoppedWhileQueued:
+				snapshot.status === "queued" ? true : snapshot.stoppedWhileQueued,
+			// Live presentation belongs to the dead process, not the durable conversation.
+			responseText: interrupted ? "" : snapshot.responseText,
+		});
+	}
+
+	/** Capture the durable lifecycle and observation fields without transient carrier ownership. */
+	snapshot(): SubagentStateSnapshot {
+		return {
+			status: this._status,
+			result: this._result,
+			pendingQuestion: this._pendingQuestion,
+			workspaceNotice: this._workspaceNotice,
+			error: this._error,
+			stoppedWhileQueued: this._stoppedWhileQueued,
+			startedAt: this._startedAt,
+			completedAt: this._completedAt,
+			consumedAt: this._consumedAt,
+			toolUses: this._toolUses,
+			lifetimeUsage: { ...this._lifetimeUsage },
+			compactionCount: this._compactionCount,
+			turnCount: this._turnCount,
+			responseText: this._responseText,
+		};
 	}
 
 	/** Running or queued — still live. */

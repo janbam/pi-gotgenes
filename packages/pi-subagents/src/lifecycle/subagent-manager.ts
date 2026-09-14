@@ -11,15 +11,33 @@ import type { Model } from "@earendil-works/pi-ai";
 import { type BackgroundRequest, resolveBackgroundMode } from "#src/config/invocation-config";
 import { debugLog } from "#src/debug";
 import type { ConcurrencyLimiter } from "#src/lifecycle/concurrency-limiter";
-import type { CreateSubagentSessionParams } from "#src/lifecycle/create-subagent-session";
+import type {
+  CreateSubagentSessionParams,
+  RestoreSubagentSessionParams,
+} from "#src/lifecycle/create-subagent-session";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
 import { type ResumeRefusal, Subagent, type SubagentLifecycleObserver } from "#src/lifecycle/subagent";
+import {
+  loadSubagentRegistry,
+  type PersistedSubagentRecord,
+  type PersistedSubagentTombstone,
+  type SubagentRegistrySession,
+  type SubagentRegistryWriter,
+  saveSubagentRegistry,
+} from "#src/lifecycle/subagent-persistence";
 import type { SubagentSession } from "#src/lifecycle/subagent-session";
 import { SubagentState } from "#src/lifecycle/subagent-state";
 import type { WorkspaceProvider } from "#src/lifecycle/workspace";
 
 import type { RunConfig } from "#src/runtime";
-import type { AgentConfig, CompactionInfo, ParentSessionInfo, SubagentType, ThinkingLevel } from "#src/types";
+import type {
+  AgentConfig,
+  CompactionInfo,
+  ParentSessionInfo,
+  SessionContext,
+  SubagentType,
+  ThinkingLevel,
+} from "#src/types";
 
 /**
  * The agent-registry slice the manager needs to resolve a spawn. Deliberately
@@ -34,10 +52,14 @@ export interface SpawnTypeResolver {
 /**
  * Why a resume was refused, across every front door.
  *
- * Widens the record's own vocabulary by the one refusal that is not a fact
- * about a record: an id no record answers to.
+ * Widens the record's own vocabulary with manager-boundary refusals: an ID no
+ * record answers to, an explicit tombstone, or a transient parent transition.
  */
-export type ResumeRefusalReason = ResumeRefusal | "unknown-agent";
+export type ResumeRefusalReason =
+  | ResumeRefusal
+  | "unknown-agent"
+  | "deleted"
+  | "parent-transition";
 
 /**
  * What a resume attempt produced: the record whose run was restarted, or the
@@ -66,6 +88,10 @@ interface ResolvedSpawn {
   type: SubagentType;
   isBackground: boolean;
 }
+
+/** Stable service error for a spawn re-entering a parent-session transition. */
+const PARENT_TRANSITION_SPAWN_ERROR =
+  "Cannot spawn a subagent while a parent session transition is in progress";
 
 /**
  * Session-retention windows (minutes). `SettingsManager` satisfies this
@@ -160,6 +186,10 @@ export interface SubagentManagerObserver {
 export interface SubagentManagerOptions {
   /** Assembly factory that produces a born-complete SubagentSession per spawn. */
   createSubagentSession: (params: CreateSubagentSessionParams) => Promise<SubagentSession>;
+  /** Reopens a child JSONL after its live SDK session was released. */
+  restoreSubagentSession?: (
+    params: RestoreSubagentSessionParams,
+  ) => Promise<SubagentSession>;
   /** Concurrency limiter — schedules background run thunks FIFO against the limit. */
   limiter: ConcurrencyLimiter;
   /** Base working directory handed to a workspace provider (the parent cwd). */
@@ -170,6 +200,8 @@ export interface SubagentManagerOptions {
   observer?: SubagentManagerObserver;
   /** Agent registry, consulted to canonicalize a spawn's type and resolve its config. */
   registry: SpawnTypeResolver;
+  /** Session-global writer from the extension API for the currently active parent. */
+  writeSessionState?: SubagentRegistryWriter;
 }
 
 export interface AgentSpawnConfig {
@@ -203,12 +235,27 @@ export class SubagentManager {
   private sweepInterval: ReturnType<typeof setInterval>;
   private readonly observer?: SubagentManagerObserver;
   private readonly createSubagentSession: (params: CreateSubagentSessionParams) => Promise<SubagentSession>;
+  private readonly restoreSubagentSession?: (
+    params: RestoreSubagentSessionParams,
+  ) => Promise<SubagentSession>;
   private readonly limiter: ConcurrencyLimiter;
   private readonly baseCwd: string;
   private getRunConfig?: () => RunConfig;
   private getRetentionPolicy?: () => RetentionPolicy;
   private readonly registry: SpawnTypeResolver;
+  private readonly writeSessionState?: SubagentRegistryWriter;
   private _workspaceProvider?: WorkspaceProvider;
+  private activeSession?: SubagentRegistrySession;
+  private hiddenRecords: PersistedSubagentRecord[] = [];
+  private tombstones = new Map<string, PersistedSubagentTombstone>();
+  private hiddenTombstones: PersistedSubagentTombstone[] = [];
+  private registryIncompatibility?: string;
+  /** Closes spawn/resume admission while the active parent projection is changing. */
+  private parentTransitioning = false;
+  /** Records settling after leaf commit whose effects must not reach the selected sibling. */
+  private readonly silencedRecords = new Set<Subagent>();
+  /** Session/workspace restoration handles that must settle before lineage projection changes. */
+  private readonly resumePreparations = new Map<Subagent, Promise<ResumeRefusalReason | undefined>>();
 
   /** The registered workspace provider, or undefined when none is registered. */
   get workspaceProvider(): WorkspaceProvider | undefined {
@@ -217,12 +264,14 @@ export class SubagentManager {
 
   constructor(options: SubagentManagerOptions) {
     this.createSubagentSession = options.createSubagentSession;
+    this.restoreSubagentSession = options.restoreSubagentSession;
     this.limiter = options.limiter;
     this.baseCwd = options.baseCwd;
     this.observer = options.observer;
     this.getRunConfig = options.getRunConfig;
     this.getRetentionPolicy = options.getRetentionPolicy;
     this.registry = options.registry;
+    this.writeSessionState = options.writeSessionState;
     // Periodically release the heavy session of terminal agents past their
     // retention window. The lightweight record (with its result) is kept for the
     // session lifetime, so get_subagent_result never misses in-session.
@@ -248,45 +297,389 @@ export class SubagentManager {
   }
 
   /** Compose a per-agent lifecycle observer from manager and spawn-config concerns. */
-  private buildObserver(options: AgentSpawnConfig): SubagentLifecycleObserver {
+  private buildObserver(spawnObserver?: SubagentLifecycleObserver): SubagentLifecycleObserver {
     return {
       onStarted: (agent) => {
-        this.observer?.onSubagentStarted(agent);
+        if (this.shouldPublishRecord(agent)) {
+          this.observer?.onSubagentStarted(agent);
+        }
+        this.persistRegistry();
       },
-      onSessionCreated: options.observer?.onSessionCreated
-        ? (agent) => options.observer!.onSessionCreated!(agent)
-        : undefined,
-      // Terminal transitions are reported for every agent. Whether the parent
-      // needs telling is the notification layer's decision, made from the
-      // carrier claim; suppressing the observer here would also suppress the
-      // lifecycle event and the session-history record, which are facts about
-      // the run rather than announcements.
+      onSessionCreated: (agent) => {
+        if (this.shouldPublishRecord(agent)) {
+          spawnObserver?.onSessionCreated?.(agent);
+        }
+        this.persistRegistry();
+      },
+      // Terminal transitions are normally reported for every agent. A record
+      // silenced during branch reconciliation is the exception: its facts
+      // belong to the departed sibling, while registry persistence still runs.
       onRunFinished: (agent) => {
-        try { this.observer?.onSubagentCompleted(agent); } catch (err) { debugLog("onSubagentCompleted observer", err); }
+        if (this.shouldPublishRecord(agent)) {
+          try { this.observer?.onSubagentCompleted(agent); } catch (err) { debugLog("onSubagentCompleted observer", err); }
+        }
+        this.persistRegistry();
       },
       onResumeStarted: (agent) => {
-        try { this.observer?.onSubagentResuming(agent); } catch (err) { debugLog("onSubagentResuming observer", err); }
+        if (this.shouldPublishRecord(agent)) {
+          try { this.observer?.onSubagentResuming(agent); } catch (err) { debugLog("onSubagentResuming observer", err); }
+        }
+        this.persistRegistry();
       },
       onResumeFinished: (agent) => {
-        try { this.observer?.onSubagentResumed(agent); } catch (err) { debugLog("onSubagentResumed observer", err); }
+        if (this.shouldPublishRecord(agent)) {
+          try { this.observer?.onSubagentResumed(agent); } catch (err) { debugLog("onSubagentResumed observer", err); }
+        }
+        this.persistRegistry();
       },
       onUpdateSent: (agent, message) => {
-        this.observer?.onSubagentUpdate?.(agent, message);
+        if (this.shouldPublishRecord(agent)) {
+          this.observer?.onSubagentUpdate?.(agent, message);
+        }
+        this.persistRegistry();
       },
       onWorkspaceNotice: (agent, notice) => {
-        this.observer?.onSubagentWorkspaceNotice?.(agent, notice);
+        if (this.shouldPublishRecord(agent)) {
+          this.observer?.onSubagentWorkspaceNotice?.(agent, notice);
+        }
+        this.persistRegistry();
       },
       onCompacted: (agent, info) => {
-        this.observer?.onSubagentCompacted(agent, info);
+        if (this.shouldPublishRecord(agent)) {
+          this.observer?.onSubagentCompacted(agent, info);
+        }
+        this.persistRegistry();
+      },
+      onStateChanged: () => {
+        this.persistRegistry();
       },
     };
+  }
+
+  /** True when a record still belongs to the selected branch and is safe to announce. */
+  private shouldPublishRecord(record: Subagent): boolean {
+    return !this.silencedRecords.has(record) && this.isRecordVisible(record);
+  }
+
+  /** Enforce lineage directly from Pi's live branch, before lifecycle projection catches up. */
+  private isRecordVisible(record: Subagent): boolean {
+    if (this.agents.get(record.id) !== record) return false;
+    return this.isParentEntryVisible(record.parentEntryId);
+  }
+
+  /** Resolve branch ownership from Pi's live ancestry, not the projected registry cache. */
+  private isParentEntryVisible(parentEntryId: string | null): boolean {
+    // A manager can run without parent persistence in headless/API use. With no
+    // active session there is no competing lineage to filter against.
+    if (!this.activeSession) return true;
+    if (parentEntryId === null) return true;
+    return this.activeSession.getBranch().some(
+      (entry) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        "id" in entry &&
+        entry.id === parentEntryId,
+    );
+  }
+
+  /** Activate the registry belonging to the selected parent session. */
+  activate(ctx: SessionContext): void {
+    if (this.agents.size > 0 || this.activeSession) {
+      throw new Error("Cannot activate a parent session before deactivating the current one");
+    }
+    this.activeSession = ctx.sessionManager;
+    const loaded = loadSubagentRegistry(ctx.sessionManager);
+    if (loaded.kind === "incompatible") {
+      this.registryIncompatibility = loaded.reason;
+      return;
+    }
+
+    this.registryIncompatibility = undefined;
+    this.hiddenRecords = loaded.hiddenRecords;
+    this.tombstones = new Map(
+      loaded.tombstones.map((tombstone) => [tombstone.id, tombstone]),
+    );
+    this.hiddenTombstones = loaded.hiddenTombstones;
+    // Hydrate lightweight records only. The child SDK session is reopened on
+    // demand, keeping activation bounded even for a long parent history.
+    for (const persisted of loaded.records) {
+      this.agents.set(persisted.id, this.hydrateRecord(persisted, ctx));
+    }
+    this.persistRegistry();
+  }
+
+  /** Settle records that will leave the selected ancestry before Pi moves the leaf. */
+  async prepareTreeTransition(commonAncestorId: string | null): Promise<void> {
+    if (!this.activeSession) return;
+
+    // Close synchronous service admission before any terminal observer can
+    // re-enter the manager from the old branch.
+    if (this.parentTransitioning) {
+      throw new Error("Parent tree navigation preparation is already in progress");
+    }
+    this.parentTransitioning = true;
+
+    try {
+      // An anchor remains visible on both branches only through their common
+      // ancestor. Root-scoped records are shared independently of entry IDs.
+      const sharedAncestry = this.sharedAncestryThrough(commonAncestorId);
+      const departing = [...this.agents.values()].filter(
+        (record) =>
+          record.parentEntryId !== null &&
+          !sharedAncestry.has(record.parentEntryId),
+      );
+
+      // A resume may already be restoring a session when navigation begins.
+      // Its post-restore transition check refuses before
+      // a resumed turn starts; wait for that preflight before releasing state.
+      await Promise.allSettled(this.pendingResumePreparations(departing));
+
+      // Terminal observers run while the old leaf is still active, keeping
+      // branch-local history and notifications out of the selected sibling.
+      for (const record of departing) this.abort(record.id);
+      const inFlight = this.unsettledRunHandles(departing);
+      this.persistRegistry();
+      await Promise.allSettled(inFlight);
+
+      // A departing record keeps its durable transcript but no process-local SDK
+      // object or workspace resource after the branch stops exposing it.
+      await Promise.allSettled(
+        departing.map((record) => record.releaseSession()),
+      );
+      this.persistRegistry();
+    } finally {
+      // Pi emits no post-event when a later extension cancels navigation. Reopen
+      // here; reconcileTree catches any old-lineage work admitted before commit.
+      this.parentTransitioning = false;
+    }
+  }
+
+  /** Reproject visible records after Pi commits a `/tree` leaf change. */
+  // Keep projection, departing-resource settlement, and hidden-state preservation
+  // in one ordered transaction; splitting phases would weaken that sequence.
+  // fallow-ignore-next-line complexity
+  async reconcileTree(ctx: SessionContext): Promise<void> {
+    if (!this.activeSession) {
+      this.activate(ctx);
+      return;
+    }
+
+    // Load from the just-persisted union so old siblings stay durable while
+    // target-branch records become discoverable again.
+    this.persistRegistry();
+    const loaded = loadSubagentRegistry(ctx.sessionManager);
+    if (loaded.kind === "incompatible") {
+      await this.clearIncompatibleRegistry(loaded.reason);
+      return;
+    }
+
+    // A service call may have admitted old-leaf work after pre-tree preparation
+    // returned. Settle it silently on the selected branch, then preserve its
+    // final durable snapshot with the hidden sibling records.
+    const visibleIds = new Set(loaded.records.map((record) => record.id));
+    const departing = [...this.agents.values()].filter(
+      (record) => !visibleIds.has(record.id),
+    );
+    for (const record of departing) this.silencedRecords.add(record);
+    try {
+      await Promise.allSettled(this.pendingResumePreparations(departing));
+      for (const record of departing) this.stopRecord(record);
+      await Promise.allSettled(this.unsettledRunHandles(departing));
+      await Promise.allSettled(
+        departing.map((record) => record.releaseSession()),
+      );
+      this.persistRegistry();
+    } finally {
+      for (const record of departing) this.silencedRecords.delete(record);
+    }
+
+    const departingIds = new Set(departing.map((record) => record.id));
+    for (const record of departing) {
+      if (this.agents.get(record.id) === record) this.agents.delete(record.id);
+    }
+    for (const persisted of loaded.records) {
+      if (!this.agents.has(persisted.id)) {
+        this.agents.set(persisted.id, this.hydrateRecord(persisted, ctx));
+      }
+    }
+
+    this.activeSession = ctx.sessionManager;
+    this.hiddenRecords = [
+      ...loaded.hiddenRecords.filter((record) => !departingIds.has(record.id)),
+      ...departing.map((record) => record.toPersistedRecord()),
+    ];
+    this.tombstones = new Map(
+      loaded.tombstones.map((tombstone) => [tombstone.id, tombstone]),
+    );
+    this.hiddenTombstones = loaded.hiddenTombstones;
+    this.registryIncompatibility = undefined;
+    this.persistRegistry();
+  }
+
+  /** Tear down every live object before exposing an incompatible durable registry. */
+  private async clearIncompatibleRegistry(reason: string): Promise<void> {
+    const records = [...this.agents.values()];
+
+    // Fail closed without leaking sessions or workspaces from the previously
+    // projected branch.
+    this.registryIncompatibility = reason;
+    for (const record of records) this.silencedRecords.add(record);
+    try {
+      await Promise.allSettled(this.pendingResumePreparations(records));
+      this.abortAll();
+      await Promise.allSettled(this.unsettledRunHandles(records));
+      await Promise.allSettled(records.map((record) => record.releaseSession()));
+    } finally {
+      for (const record of records) this.silencedRecords.delete(record);
+    }
+
+    this.agents.clear();
+    this.hiddenRecords = [];
+    this.tombstones.clear();
+    this.hiddenTombstones = [];
+  }
+
+  /** Construct one lightweight record from durable state for the active parent context. */
+  private hydrateRecord(
+    persisted: PersistedSubagentRecord,
+    ctx: SessionContext,
+  ): Subagent {
+    const snapshot: ParentSnapshot = {
+      cwd: ctx.cwd,
+      systemPrompt: ctx.getSystemPrompt(),
+      model: ctx.model,
+      modelRegistry: ctx.modelRegistry,
+    };
+    const parentSession: ParentSessionInfo = {
+      parentSessionFile: ctx.sessionManager.getSessionFile(),
+      parentSessionId: ctx.sessionManager.getSessionId(),
+    };
+    return new Subagent({
+      id: persisted.id,
+      type: persisted.type,
+      description: persisted.description,
+      isBackground: persisted.isBackground,
+      parentEntryId: persisted.parentEntryId,
+      resumeSpec: persisted.session,
+      workspace: persisted.workspace,
+      state: SubagentState.restore(persisted.state),
+      execution: {
+        createSubagentSession: this.createSubagentSession,
+        restoreSubagentSession: this.restoreSubagentSession,
+        snapshot,
+        prompt: "",
+        baseCwd: this.baseCwd,
+        observer: this.buildObserver(),
+        getRunConfig: this.getRunConfig,
+        getWorkspaceProvider: () => this._workspaceProvider,
+        isCurrent: (agent) => this.isRecordVisible(agent),
+        parentSession: { ...parentSession, toolCallId: persisted.toolCallId },
+      },
+    });
+  }
+
+  /** IDs on the old branch that remain shared through the common ancestor. */
+  private sharedAncestryThrough(commonAncestorId: string | null): Set<string> {
+    if (commonAncestorId === null || !this.activeSession) return new Set();
+
+    const shared = new Set<string>();
+    for (const entry of this.activeSession.getBranch()) {
+      if (typeof entry !== "object" || entry === null || !("id" in entry)) {
+        continue;
+      }
+      const id = entry.id;
+      if (typeof id !== "string") continue;
+      shared.add(id);
+      if (id === commonAncestorId) return shared;
+    }
+
+    // An event naming no entry on the active branch is inconsistent. Fail
+    // closed by treating every non-root anchor as departing.
+    return new Set();
+  }
+
+  /** Handles that may still emit terminal effects; queued-stopped work never started. */
+  private unsettledRunHandles(records: readonly Subagent[]): Promise<void>[] {
+    return records
+      .filter((record) => !record.stoppedWhileQueued)
+      .map((record) => record.promise)
+      .filter((promise): promise is Promise<void> => promise !== undefined);
+  }
+
+  /** Restoration preflights currently owned by the supplied records. */
+  private pendingResumePreparations(records: readonly Subagent[]): Promise<ResumeRefusalReason | undefined>[] {
+    return records.flatMap((record) => {
+      const preparation = this.resumePreparations.get(record);
+      return preparation ? [preparation] : [];
+    });
+  }
+
+  /** Persist and release the outgoing parent view without deleting durable records. */
+  async deactivate(): Promise<void> {
+    if (!this.activeSession) return;
+    if (this.parentTransitioning) {
+      throw new Error("A parent session transition is already in progress");
+    }
+    this.parentTransitioning = true;
+
+    try {
+      const records = [...this.agents.values()];
+
+      // A restore admitted before the switch must revalidate against the closed
+      // transition gate and release its reconstructed resources before teardown.
+      await Promise.allSettled(this.pendingResumePreparations(records));
+
+      // Capture handles while records are still active: abort transitions them
+      // synchronously, but their factories, JSONL writes, and terminal observers
+      // may continue until the already-published promises settle.
+      const inFlight = this.pendingPromises();
+      this.abortAll();
+      this.persistRegistry();
+      await Promise.allSettled(inFlight);
+
+      // Include any work admitted concurrently before the lifecycle boundary
+      // finished, then persist only settled terminal state.
+      await this.waitForAll();
+      this.persistRegistry();
+
+      const releases = [...this.agents.values()].map((record) =>
+        record.releaseSession(),
+      );
+      await Promise.allSettled(releases);
+      this.persistRegistry();
+
+      this.agents.clear();
+      this.hiddenRecords = [];
+      this.tombstones.clear();
+      this.hiddenTombstones = [];
+      this.activeSession = undefined;
+      this.registryIncompatibility = undefined;
+    } finally {
+      this.parentTransitioning = false;
+    }
+  }
+
+  /** Write active and hidden branch records as one session-global registry. */
+  private persistRegistry(): void {
+    if (!this.activeSession || !this.writeSessionState || this.registryIncompatibility) {
+      return;
+    }
+    saveSubagentRegistry(
+      this.writeSessionState,
+      [
+        ...this.hiddenRecords,
+        ...[...this.agents.values()].map((record) => record.toPersistedRecord()),
+      ],
+      [...this.hiddenTombstones, ...this.tombstones.values()],
+    );
   }
 
   /**
    * Spawn an agent and return its ID immediately (for background use).
    * If the concurrency limit is reached, the agent is queued.
    *
-   * Throws when the named agent type is disabled.
+   * Throws when the named agent type is disabled or old-branch records are
+   * being settled for tree navigation.
    */
   spawn(
     snapshot: ParentSnapshot,
@@ -304,7 +697,8 @@ export class SubagentManager {
    * The caller holds the result, which is a delivery commitment: the agent must
    * not be queued and must not be announced, whatever its frontmatter declares.
    *
-   * Rejects when the named agent type is disabled.
+   * Rejects when the named agent type is disabled or old-branch records are
+   * being settled for tree navigation.
    */
   async spawnAndWait(
     snapshot: ParentSnapshot,
@@ -346,6 +740,8 @@ export class SubagentManager {
     prompt: string,
     options: AgentSpawnConfig,
   ): string {
+    if (this.parentTransitioning) throw new Error(PARENT_TRANSITION_SPAWN_ERROR);
+
     const { type, isBackground } = resolved;
     const id = randomUUID().slice(0, 17);
     const record = new Subagent({
@@ -353,6 +749,7 @@ export class SubagentManager {
       type,
       description: options.description,
       isBackground,
+      parentEntryId: options.parentSession?.parentEntryId,
       state: new SubagentState({
         status: isBackground ? "queued" : "running",
         startedAt: Date.now(),
@@ -362,9 +759,10 @@ export class SubagentManager {
         snapshot,
         prompt,
         baseCwd: this.baseCwd,
-        observer: this.buildObserver(options),
+        observer: this.buildObserver(options.observer),
         getRunConfig: this.getRunConfig,
         getWorkspaceProvider: () => this._workspaceProvider,
+        isCurrent: (agent) => this.isRecordVisible(agent),
         model: options.model,
         maxTurns: options.maxTurns,
         thinkingLevel: options.thinkingLevel,
@@ -373,6 +771,12 @@ export class SubagentManager {
       },
     });
     this.agents.set(id, record);
+    try {
+      this.persistRegistry();
+    } catch (err) {
+      this.agents.delete(id);
+      throw err;
+    }
 
     if (isBackground) {
       this.observer?.onSubagentCreated(record);
@@ -395,14 +799,40 @@ export class SubagentManager {
    *
    * The refusal policy lives here rather than in a caller, so every front door
    * declines the same resumes for the same reasons; a door owns only how it
-   * words the answer. Delegates to Subagent.resume(), which owns the observer
-   * subscription lifecycle.
+   * words the answer. A parent tree transition is a transient manager-boundary
+   * refusal, so retrying the same ID after preparation remains valid. Delegates
+   * to Subagent.resume(), which owns the observer subscription lifecycle.
    */
+  // This is the single public refusal funnel; its branches are the API contract.
+  // fallow-ignore-next-line complexity
   async resume(id: string, prompt: string, options: ResumeCallOptions = {}): Promise<ResumeOutcome> {
-    const agent = this.agents.get(id);
+    if (this.parentTransitioning) {
+      return { kind: "refused", reason: "parent-transition" };
+    }
+    if (this.registryIncompatibility) {
+      return { kind: "refused", reason: "incompatible" };
+    }
+    const tombstone = this.tombstones.get(id);
+    if (tombstone && this.isParentEntryVisible(tombstone.parentEntryId)) {
+      return { kind: "refused", reason: "deleted" };
+    }
+    const agent = this.getRecord(id);
     if (!agent) return { kind: "refused", reason: "unknown-agent" };
     const refusal = agent.resumeRefusal;
-    if (refusal) return { kind: "refused", reason: refusal };
+    if (refusal && refusal !== "unavailable" && refusal !== "incompatible") {
+      return { kind: "refused", reason: refusal };
+    }
+    const preparation = this.prepareRecordForResume(agent);
+    this.resumePreparations.set(agent, preparation);
+    let restoreRefusal: ResumeRefusalReason | undefined;
+    try {
+      restoreRefusal = await preparation;
+    } finally {
+      if (this.resumePreparations.get(agent) === preparation) {
+        this.resumePreparations.delete(agent);
+      }
+    }
+    if (restoreRefusal) return { kind: "refused", reason: restoreRefusal };
     // Before the resume starts: resetForResume runs synchronously inside
     // resume(), so a claim taken afterwards would miss the terminal edge.
     if (options.claimOutcome) agent.claim();
@@ -410,20 +840,46 @@ export class SubagentManager {
     return { kind: "resumed", record: agent };
   }
 
+  /** Restore one child, then revalidate parent state before a resumed turn may start. */
+  private async prepareRecordForResume(agent: Subagent): Promise<ResumeRefusalReason | undefined> {
+    const restoreRefusal = await agent.prepareResume();
+
+    // Restoration crosses asynchronous filesystem and SDK boundaries. Keep
+    // this release inside the tracked preflight so `/tree` also awaits cleanup.
+    if (this.parentTransitioning || !this.isRecordVisible(agent)) {
+      await agent.releaseSession();
+      this.persistRegistry();
+      return "parent-transition";
+    }
+    if (restoreRefusal) return restoreRefusal;
+    if (this.registryIncompatibility) {
+      await agent.releaseSession();
+      return "incompatible";
+    }
+    return undefined;
+  }
+
   getRecord(id: string): Subagent | undefined {
-    return this.agents.get(id);
+    const record = this.agents.get(id);
+    return record && this.isRecordVisible(record) ? record : undefined;
   }
 
   listAgents(): Subagent[] {
-    return [...this.agents.values()].sort(
+    return [...this.agents.values()].filter((record) =>
+      this.isRecordVisible(record)).sort(
       (a, b) => b.startedAt - a.startedAt,
     );
   }
 
   abort(id: string): boolean {
-    const record = this.agents.get(id);
+    const record = this.getRecord(id);
     if (!record) return false;
 
+    return this.stopRecord(record);
+  }
+
+  /** Stop one known record without re-applying the public lineage lookup. */
+  private stopRecord(record: Subagent): boolean {
     // A queued agent has not started; stop it through the same terminal funnel
     // a running agent's stop uses. Its scheduled thunk becomes a no-op (status
     // guard) when its slot finally opens.
@@ -442,6 +898,13 @@ export class SubagentManager {
    */
   private removeRecord(id: string, record: Subagent): Promise<void> {
     this.agents.delete(id);
+    this.tombstones.set(id, {
+      id,
+      parentEntryId: record.parentEntryId,
+      reason: "deleted",
+      deletedAt: Date.now(),
+    });
+    this.persistRegistry();
     return record.disposeSession();
   }
 
@@ -465,12 +928,13 @@ export class SubagentManager {
   }
 
   /**
-   * Remove all completed/stopped/errored records immediately.
-   * Called on session start/switch so tasks from a prior session don't persist.
+   * Explicitly delete every completed/stopped/errored record in the active lineage.
+   * Session navigation uses deactivate(), which preserves these durable records.
    */
   async clearCompleted(): Promise<void> {
     const teardowns: Promise<void>[] = [];
     for (const [id, record] of this.agents) {
+      if (!this.isRecordVisible(record)) continue;
       if (record.isActive()) continue;
       teardowns.push(this.removeRecord(id, record));
     }
@@ -480,7 +944,7 @@ export class SubagentManager {
   /** Whether any agents are still running or queued. */
   // fallow-ignore-next-line unused-class-member
   hasRunning(): boolean {
-    return [...this.agents.values()].some(r => r.isActive());
+    return this.listAgents().some((record) => record.isActive());
   }
 
   /** Abort all running and queued agents immediately. */
@@ -500,7 +964,6 @@ export class SubagentManager {
   }
 
   /** Wait for all running and queued agents to complete (including queued ones). */
-  // fallow-ignore-next-line unused-class-member
   async waitForAll(): Promise<void> {
     // Every spawned agent has a settled-on-completion promise (the limiter starts
     // queued ones as slots free), so a single allSettled covers the queued case.
@@ -532,6 +995,8 @@ export class SubagentManager {
     this.limiter.clear();
     const teardowns = [...this.agents.values()].map(record => record.disposeSession());
     this.agents.clear();
+    this.tombstones.clear();
+    this.hiddenTombstones = [];
     await Promise.allSettled(teardowns);
   }
 }

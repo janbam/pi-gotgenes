@@ -39,6 +39,7 @@ function makePi() {
         }),
       },
       appendEntry: vi.fn(),
+      setSessionState: vi.fn(),
       sendMessage: vi.fn(() => {
         throw new Error("stale extension context");
       }),
@@ -74,7 +75,9 @@ function makeHeadlessCtx() {
     sessionManager: {
       getSessionId: vi.fn(() => "session-1"),
       getSessionFile: vi.fn(() => "/sessions/parent.jsonl"),
+      getLeafId: vi.fn(() => null),
       getBranch: vi.fn(() => []),
+      getSessionState: vi.fn(() => undefined),
     },
     getSystemPrompt: vi.fn(() => "parent prompt"),
   } as any;

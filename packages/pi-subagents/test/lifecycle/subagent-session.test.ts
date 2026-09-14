@@ -156,6 +156,7 @@ function makeSubagentSession(
     agentName: string;
     agentMaxTurns: number | undefined;
     parentContext: string | undefined;
+    isCurrent: () => boolean;
     lifecycle: ReturnType<typeof createChildLifecycleMock>;
   }>,
 ) {
@@ -168,6 +169,7 @@ function makeSubagentSession(
     agentName: metaOverrides?.agentName ?? "Explore",
     agentMaxTurns: metaOverrides?.agentMaxTurns,
     parentContext: metaOverrides?.parentContext,
+    isCurrent: metaOverrides?.isCurrent,
     lifecycle,
   });
   return { sub, lifecycle };
@@ -313,6 +315,18 @@ describe("SubagentSession — runTurnLoop lifecycle events", () => {
       aborted: false,
       steered: false,
     });
+  });
+
+  it("suppresses completed after the child leaves the active parent lineage", async () => {
+    const { session } = createSession("old sibling result");
+    const { sub } = makeSubagentSession(session, {
+      lifecycle,
+      isCurrent: () => false,
+    });
+
+    await sub.runTurnLoop("go", {});
+
+    expect(lifecycle.completed).not.toHaveBeenCalled();
   });
 
   it("releases its turn-outcome subscription on dispose", async () => {

@@ -1,14 +1,24 @@
+import type { JsonValue } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { AgentTypeRegistry } from "#src/config/agent-types";
 import { ConcurrencyLimiter } from "#src/lifecycle/concurrency-limiter";
-import type { CreateSubagentSessionParams } from "#src/lifecycle/create-subagent-session";
+import type {
+  CreateSubagentSessionParams,
+  RestoreSubagentSessionParams,
+} from "#src/lifecycle/create-subagent-session";
 import type { AgentSpawnConfig } from "#src/lifecycle/subagent-manager";
 import { resolveRetentionWindow, SubagentManager, type SubagentManagerObserver } from "#src/lifecycle/subagent-manager";
+import type {
+  PersistedSubagentRecord,
+  SubagentRegistryWriter,
+} from "#src/lifecycle/subagent-persistence";
 import type { SubagentSession } from "#src/lifecycle/subagent-session";
 import type { WorkspaceProvider } from "#src/lifecycle/workspace";
 import { NotificationManager } from "#src/observation/notification";
+import { SubagentEventsObserver } from "#src/observation/subagent-events-observer";
 import type { RunConfig } from "#src/runtime";
-import type { AgentConfig, Subagent } from "#src/types";
+import { SubagentsServiceAdapter } from "#src/service/service-adapter";
+import type { AgentConfig, SessionContext, Subagent } from "#src/types";
 import { makeWorkspace, makeWorkspaceProvider } from "#test/helpers/make-workspace";
 import { createBlockingFactory, createSessionFactory } from "#test/helpers/manager-stubs";
 import { createMockSession, createSubagentSessionStub, emitResumeUsageAndCompaction, toSubagentSession } from "#test/helpers/mock-session";
@@ -18,6 +28,9 @@ import { STUB_SNAPSHOT } from "#test/helpers/stub-ctx";
 const DEFAULT_MAX_CONCURRENT = 4;
 
 type SessionFactory = (params: CreateSubagentSessionParams) => Promise<SubagentSession>;
+type RestoreFactory = (
+  params: RestoreSubagentSessionParams,
+) => Promise<SubagentSession>;
 
 /** Default factory: resolves to a fresh SubagentSession stub on every spawn. */
 function defaultFactory(): SessionFactory {
@@ -50,36 +63,98 @@ function registryWith(name: string, overrides: Partial<AgentConfig>): AgentTypeR
 /** Test helper: construct an SubagentManager with injected stubs. */
 function createManager(overrides?: {
   createSubagentSession?: SessionFactory;
+  restoreSubagentSession?: RestoreFactory;
   observer?: Partial<SubagentManagerObserver>;
   getMaxConcurrent?: () => number;
   getRunConfig?: () => RunConfig;
   getRetentionPolicy?: () => { consumedSessionRetentionMinutes: number; unconsumedSessionRetentionMinutes: number };
   baseCwd?: string;
   registry?: AgentTypeRegistry;
+  writeSessionState?: SubagentRegistryWriter;
 }) {
   const createSubagentSession: SessionFactory = overrides?.createSubagentSession ?? defaultFactory();
   const observer: SubagentManagerObserver | undefined = overrides?.observer
     ? {
-        onSubagentStarted: overrides.observer.onSubagentStarted ?? (() => {}),
-        onSubagentCompleted: overrides.observer.onSubagentCompleted ?? (() => {}),
-        onSubagentResumed: overrides.observer.onSubagentResumed ?? (() => {}),
-        onSubagentResuming: overrides.observer.onSubagentResuming ?? (() => {}),
-        onSubagentCompacted: overrides.observer.onSubagentCompacted ?? (() => {}),
-        onSubagentCreated: overrides.observer.onSubagentCreated ?? (() => {}),
-        onSubagentWorkspaceNotice: overrides.observer.onSubagentWorkspaceNotice,
+        onSubagentStarted: () => {},
+        onSubagentCompleted: () => {},
+        onSubagentResumed: () => {},
+        onSubagentResuming: () => {},
+        onSubagentCompacted: () => {},
+        onSubagentCreated: () => {},
+        ...overrides.observer,
       }
     : undefined;
   const limiter = new ConcurrencyLimiter(overrides?.getMaxConcurrent ?? (() => DEFAULT_MAX_CONCURRENT));
   const mgr = new SubagentManager({
     createSubagentSession,
+    restoreSubagentSession: overrides?.restoreSubagentSession,
     observer,
     limiter,
     baseCwd: overrides?.baseCwd ?? "/repo",
     getRunConfig: overrides?.getRunConfig,
     getRetentionPolicy: overrides?.getRetentionPolicy,
     registry: overrides?.registry ?? defaultRegistry(),
+    writeSessionState: overrides?.writeSessionState,
   });
   return { manager: mgr, createSubagentSession, limiter };
+}
+
+/** Mutable Pi session-state boundary used to simulate switch/reopen activation. */
+function parentState(
+  initial?: unknown,
+  branchIds: string[] = ["entry-1"],
+) {
+  let stored = initial;
+  const writeSessionState = vi.fn<SubagentRegistryWriter>((_key, value) => {
+    stored = value;
+  });
+  const ctx: SessionContext = {
+    cwd: "/repo",
+    model: undefined,
+    modelRegistry: { find: () => undefined, getAll: () => [] },
+    getSystemPrompt: () => "parent prompt",
+    sessionManager: {
+      getSessionFile: () => "/sessions/parent.jsonl",
+      getSessionId: () => "parent-session",
+      getLeafId: () => branchIds.at(-1) ?? null,
+      getBranch: () => branchIds.map((id) => ({ id })),
+      getSessionState: <T extends JsonValue>() => stored as T | undefined,
+    },
+  };
+  return { ctx, writeSessionState, read: () => stored };
+}
+
+/** One settled durable record for activation and branch-isolation tests. */
+function persistedRecord(
+  id: string,
+  parentEntryId: string | null,
+): PersistedSubagentRecord {
+  return {
+    id,
+    type: "Explore",
+    description: `record ${id}`,
+    isBackground: true,
+    parentEntryId,
+    state: {
+      status: "completed",
+      result: "done",
+      startedAt: 100,
+      completedAt: 200,
+      toolUses: 0,
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      compactionCount: 0,
+      turnCount: 1,
+      responseText: "done",
+    },
+    session: {
+      outputFile: `/tasks/${id}.jsonl`,
+      sessionId: `session-${id}`,
+      sessionDir: "/tasks",
+      effectiveCwd: "/repo",
+      systemPrompt: "Explore",
+      toolNames: ["read"],
+    },
+  };
 }
 
 /** Spawn a background agent using STUB_SNAPSHOT. */
@@ -154,6 +229,792 @@ function seedForegroundNotificationScenario() {
 }
 
 describe("SubagentManager", () => {
+  describe("durable parent registry", () => {
+    let managers: SubagentManager[] = [];
+
+    afterEach(async () => {
+      await Promise.all(managers.map((manager) => manager.dispose()));
+      managers = [];
+    });
+
+    it("hydrates only active-ancestry records while preserving hidden siblings", () => {
+      const visible = persistedRecord("visible", "entry-1");
+      const hidden = persistedRecord("hidden", "sibling-entry");
+      const parent = parentState(
+        { version: 1, records: [visible, hidden] },
+        ["entry-1", "entry-2"],
+      );
+      const { manager } = createManager({
+        writeSessionState: parent.writeSessionState,
+      });
+      managers.push(manager);
+
+      manager.activate(parent.ctx);
+
+      expect(manager.listAgents().map((record) => record.id)).toEqual(["visible"]);
+      expect(parent.writeSessionState).toHaveBeenLastCalledWith(
+        "@gotgenes/pi-subagents",
+        expect.objectContaining({ records: [hidden, expect.objectContaining({ id: "visible" })] }),
+      );
+    });
+
+    it("reopens and resumes the same ID after parent compaction and process reactivation", async () => {
+      const branchIds = ["entry-1"];
+      const parent = parentState(undefined, branchIds);
+      const fresh = createSessionFactory(createMockSession(), "/tasks/agent.jsonl");
+      const first = createManager({
+        createSubagentSession: fresh.factory,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(first);
+      first.activate(parent.ctx);
+      const id = first.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "durable child",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: {
+          parentSessionFile: "/sessions/parent.jsonl",
+          parentSessionId: "parent-session",
+          parentEntryId: "entry-1",
+        },
+      });
+      await first.getRecord(id)!.promise;
+
+      // Parent compaction extends the active branch but must retain handles
+      // anchored earlier in that same ancestry.
+      branchIds.push("compaction-1");
+      await first.deactivate();
+
+      const reopened = createSubagentSessionStub(
+        createMockSession(),
+        "/tasks/agent.jsonl",
+      );
+      reopened.resumeTurnLoop.mockResolvedValue("continued after reopen");
+      const restoreSubagentSession = vi.fn<RestoreFactory>(async () =>
+        toSubagentSession(reopened),
+      );
+      const second = createManager({
+        restoreSubagentSession,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(second);
+
+      second.activate(parent.ctx);
+      const hydrated = second.getRecord(id)!;
+      expect(hydrated.id).toBe(id);
+      expect(hydrated.isSessionReady()).toBe(false);
+
+      const outcome = await second.resume(id, "continue");
+
+      expect(outcome).toEqual({ kind: "resumed", record: hydrated });
+      expect(restoreSubagentSession).toHaveBeenCalledOnce();
+      expect(reopened.resumeTurnLoop).toHaveBeenCalledWith(
+        "continue",
+        undefined,
+      );
+      expect(hydrated.result).toBe("continued after reopen");
+    });
+
+    it("restores the persisted workspace before reopening the child session", async () => {
+      const parent = parentState();
+      const liveWorkspace = makeWorkspace("/ws/agent", undefined, {
+        state: { path: "/ws/agent", revision: "abc123" },
+      });
+      const first = createManager({
+        createSubagentSession: createSessionFactory(
+          createMockSession(),
+          "/tasks/workspace-agent.jsonl",
+        ).factory,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(first);
+      first.registerWorkspaceProvider(makeWorkspaceProvider(liveWorkspace));
+      first.activate(parent.ctx);
+      const id = first.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "workspace child",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "entry-1" },
+      });
+      await first.getRecord(id)!.promise;
+      await first.deactivate();
+
+      const order: string[] = [];
+      const restoredWorkspace = makeWorkspace("/ws/agent");
+      const provider = makeWorkspaceProvider(undefined, restoredWorkspace);
+      provider.restore.mockImplementation(async () => {
+        order.push("workspace");
+        return restoredWorkspace;
+      });
+      const reopened = createSubagentSessionStub(
+        createMockSession(),
+        "/tasks/workspace-agent.jsonl",
+      );
+      const restoreSubagentSession = vi.fn<RestoreFactory>(async () => {
+        order.push("session");
+        return toSubagentSession(reopened);
+      });
+      const second = createManager({
+        restoreSubagentSession,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(second);
+      second.registerWorkspaceProvider(provider);
+      second.activate(parent.ctx);
+
+      await second.resume(id, "continue");
+
+      expect(order).toEqual(["workspace", "session"]);
+      expect(provider.restore).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: id }),
+        { path: "/ws/agent", revision: "abc123" },
+      );
+    });
+
+    it("resuspends a reconstructed workspace when reopening the child session fails", async () => {
+      const persisted = persistedRecord("workspace-agent", "entry-1");
+      persisted.workspace = {
+        providerId: "test-workspace",
+        state: { path: "/ws/agent", revision: "abc123" },
+      };
+      const parent = parentState({ version: 1, records: [persisted] });
+      const restoredWorkspace = makeWorkspace("/ws/agent", undefined, {
+        state: { path: "/ws/agent", revision: "abc123" },
+      });
+      const manager = createManager({
+        restoreSubagentSession: vi.fn(async () => {
+          throw new Error("child session unavailable");
+        }),
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.registerWorkspaceProvider(
+        makeWorkspaceProvider(undefined, restoredWorkspace),
+      );
+      manager.activate(parent.ctx);
+
+      // A failed child reopen leaves no turn to own the restored directory, so
+      // the resume boundary must return it to its durable checkpoint at once.
+      await expect(manager.resume(persisted.id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "unavailable",
+      });
+
+      expect(restoredWorkspace.suspend).toHaveBeenCalledWith({
+        status: "completed",
+        description: "record workspace-agent",
+      });
+      expect(manager.getRecord(persisted.id)?.resumeRefusal).toBe("unavailable");
+    });
+
+    it("allows the same ID to retry after its required workspace provider is restored", async () => {
+      const persisted = persistedRecord("workspace-agent", "entry-1");
+      persisted.workspace = {
+        providerId: "test-workspace",
+        state: { path: "/ws/agent", revision: "abc123" },
+      };
+      const parent = parentState({ version: 1, records: [persisted] });
+      const reopened = createSubagentSessionStub();
+      const manager = createManager({
+        restoreSubagentSession: vi.fn(async () => toSubagentSession(reopened)),
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+
+      await expect(manager.resume(persisted.id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "incompatible",
+      });
+
+      manager.registerWorkspaceProvider(
+        makeWorkspaceProvider(undefined, makeWorkspace("/ws/agent")),
+      );
+      await expect(manager.resume(persisted.id, "continue")).resolves.toMatchObject({
+        kind: "resumed",
+      });
+    });
+
+    it("does not expose or resume a durable ID from an unrelated parent session", async () => {
+      const origin = parentState({
+        version: 1,
+        records: [persistedRecord("origin-agent", "entry-1")],
+      });
+      const unrelated = parentState(undefined, ["unrelated-entry"]);
+      const { manager } = createManager({
+        writeSessionState: unrelated.writeSessionState,
+      });
+      managers.push(manager);
+
+      manager.activate(unrelated.ctx);
+
+      expect(manager.getRecord("origin-agent")).toBeUndefined();
+      await expect(manager.resume("origin-agent", "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "unknown-agent",
+      });
+      expect(origin.read()).toBeDefined();
+    });
+
+    it("returns a stable incompatibility when the active registry schema is unsupported", async () => {
+      const parent = parentState({ version: 99, records: [] });
+      const { manager } = createManager({
+        writeSessionState: parent.writeSessionState,
+      });
+      managers.push(manager);
+      manager.activate(parent.ctx);
+
+      await expect(manager.resume("agent-1", "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "incompatible",
+      });
+    });
+
+    it("keeps an explicit deletion reason stable across parent reactivation", async () => {
+      const parent = parentState();
+      const first = createManager({
+        createSubagentSession: createSessionFactory().factory,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(first);
+      first.activate(parent.ctx);
+      const id = first.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "deletable child",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "entry-1" },
+      });
+      await first.getRecord(id)!.promise;
+
+      await first.clearCompleted();
+
+      await expect(first.resume(id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+      await first.deactivate();
+
+      const second = createManager({
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(second);
+      second.activate(parent.ctx);
+      await expect(second.resume(id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+    });
+
+    it("hides a sibling tombstone immediately and restores its deletion reason on return", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const tombstone = {
+        id: "deleted-agent",
+        parentEntryId: "old-entry",
+        reason: "deleted" as const,
+        deletedAt: 300,
+      };
+      const parent = parentState(
+        { version: 1, records: [], tombstones: [tombstone] },
+        branchIds,
+      );
+      const manager = createManager({
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+      await expect(manager.resume(tombstone.id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+
+      // Pi commits the leaf before session_tree handlers finish. The old
+      // sibling's durable deletion marker must disappear at that live boundary.
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await expect(manager.resume(tombstone.id, "probe")).resolves.toEqual({
+        kind: "refused",
+        reason: "unknown-agent",
+      });
+      await manager.reconcileTree(parent.ctx);
+      expect(JSON.stringify(parent.read())).toContain(tombstone.id);
+
+      // Re-entering the owning lineage reprojects the preserved marker and
+      // recovers the stable actionable reason for the same ID.
+      branchIds.splice(0, branchIds.length, "shared-entry", "old-entry");
+      await manager.reconcileTree(parent.ctx);
+      await expect(manager.resume(tombstone.id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+    });
+
+    it("waits for in-flight session creation before clearing a deactivated registry", async () => {
+      const parent = parentState();
+      const sessionGate = Promise.withResolvers<SubagentSession>();
+      const manager = createManager({
+        createSubagentSession: vi.fn(() => sessionGate.promise),
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+      const id = spawnBg(manager);
+
+      let deactivated = false;
+      const pending = manager.deactivate().then(() => { deactivated = true; });
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+
+      expect(deactivated).toBe(false);
+      expect(manager.getRecord(id)).toBeDefined();
+
+      sessionGate.resolve(toSubagentSession(createSubagentSessionStub()));
+      await pending;
+
+      expect(deactivated).toBe(true);
+      expect(manager.listAgents()).toEqual([]);
+    });
+
+    it("waits for in-flight restoration and refuses its turn during parent-session deactivation", async () => {
+      const record = persistedRecord("restoring-agent", "entry-1");
+      const parent = parentState({ version: 1, records: [record] });
+      const restoreGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const restoredSession = createSubagentSessionStub();
+      const restoreSubagentSession = vi.fn<RestoreFactory>(async () => {
+        await restoreGate.promise;
+        return toSubagentSession(restoredSession);
+      });
+      const manager = createManager({
+        restoreSubagentSession,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+
+      // Begin restoration under the outgoing session, then close admission
+      // before that asynchronous boundary can publish a resumed turn.
+      const resuming = manager.resume(record.id, "continue");
+      await vi.waitFor(() => {
+        expect(restoreSubagentSession).toHaveBeenCalledOnce();
+      });
+      let deactivated = false;
+      const deactivating = manager.deactivate().then(() => {
+        deactivated = true;
+      });
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      expect(deactivated).toBe(false);
+      expect(() => spawnBg(manager)).toThrow(
+        "Cannot spawn a subagent while a parent session transition is in progress",
+      );
+
+      restoreGate.resolve();
+      await expect(resuming).resolves.toEqual({
+        kind: "refused",
+        reason: "parent-transition",
+      });
+      await deactivating;
+
+      expect(restoredSession.resumeTurnLoop).not.toHaveBeenCalled();
+      expect(restoredSession.dispose).toHaveBeenCalledOnce();
+      expect(manager.listAgents()).toEqual([]);
+      expect(JSON.stringify(parent.read())).toContain(record.id);
+    });
+
+    it("settles only departing sibling agents before reprojecting a tree branch", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const rootGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const siblingGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const rootSession = createSubagentSessionStub();
+      const siblingSession = createSubagentSessionStub();
+      rootSession.runTurnLoop.mockImplementation(async () => {
+        await rootGate.promise;
+        return { responseText: "shared done", aborted: false, steered: false };
+      });
+      siblingSession.runTurnLoop.mockImplementation(async () => {
+        await siblingGate.promise;
+        return { responseText: "sibling stopped", aborted: false, steered: false };
+      });
+      const sessions = [rootSession, siblingSession];
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      const sideEffects = new SubagentEventsObserver({
+        emit: vi.fn(),
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      const manager = createManager({
+        createSubagentSession: vi.fn(async () =>
+          toSubagentSession(sessions.shift() ?? createSubagentSessionStub()),
+        ),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+      const sharedId = manager.spawn(STUB_SNAPSHOT, "Explore", "shared", {
+        description: "shared agent",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "shared-entry" },
+      });
+      const siblingId = manager.spawn(STUB_SNAPSHOT, "Explore", "sibling", {
+        description: "old sibling agent",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "old-entry" },
+      });
+      await vi.waitFor(() => {
+        expect(rootSession.runTurnLoop).toHaveBeenCalledOnce();
+        expect(siblingSession.runTurnLoop).toHaveBeenCalledOnce();
+      });
+      const sharedRecord = manager.getRecord(sharedId);
+
+      // Finish the departing child while the old leaf still owns all branch-local effects.
+      const preparing = manager.prepareTreeTransition("shared-entry");
+      siblingGate.resolve();
+      await preparing;
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await manager.reconcileTree(parent.ctx);
+
+      expect(manager.getRecord(siblingId)).toBeUndefined();
+      expect(manager.getRecord(sharedId)).toBe(sharedRecord);
+      expect(manager.getRecord(sharedId)?.status).toBe("running");
+      expect(JSON.stringify(parent.read())).toContain(siblingId);
+
+      // A shared-ancestor child remains live and may complete on the selected branch.
+      rootGate.resolve();
+      await sharedRecord?.promise;
+      expect(appendedAt).toEqual(["old-entry", "new-entry"]);
+      expect(notifiedAt).toEqual(["old-entry", "new-entry"]);
+    });
+
+    it("waits for an already-aborted departing run before releasing its branch", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const runGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const session = createSubagentSessionStub();
+      const workspace = makeWorkspace("/worktrees/departing");
+      session.runTurnLoop.mockImplementation(async () => {
+        await runGate.promise;
+        return { responseText: "stopped", aborted: false, steered: false };
+      });
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      const sideEffects = new SubagentEventsObserver({
+        emit: vi.fn(),
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      const manager = createManager({
+        createSubagentSession: vi.fn(async () => toSubagentSession(session)),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.registerWorkspaceProvider(makeWorkspaceProvider(workspace));
+      manager.activate(parent.ctx);
+      const id = manager.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "already stopped sibling",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "old-entry" },
+      });
+      await vi.waitFor(() => {
+        expect(session.runTurnLoop).toHaveBeenCalledOnce();
+      });
+
+      // A synchronous stopped status does not mean the run's terminal observer
+      // and resource teardown have settled.
+      expect(manager.abort(id)).toBe(true);
+      let prepared = false;
+      const preparing = manager.prepareTreeTransition("shared-entry").then(() => {
+        prepared = true;
+      });
+      await Promise.resolve();
+      expect(prepared).toBe(false);
+      expect(session.dispose).not.toHaveBeenCalled();
+
+      runGate.resolve();
+      await preparing;
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+      expect(workspace.suspend).toHaveBeenCalledOnce();
+      expect(session.dispose).toHaveBeenCalledOnce();
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await manager.reconcileTree(parent.ctx);
+      expect(manager.getRecord(id)).toBeUndefined();
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+    });
+
+    it("rejects reentrant service spawns during tree preparation", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const siblingGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const siblingSession = createSubagentSessionStub();
+      siblingSession.runTurnLoop.mockImplementation(async () => {
+        await siblingGate.promise;
+        return { responseText: "sibling stopped", aborted: false, steered: false };
+      });
+      const workspace = makeWorkspace("/worktrees/sibling");
+      const eventsAt: Array<{ channel: string; leaf: string | undefined }> = [];
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      let reentrantError: unknown;
+      let reentrantResume: ReturnType<SubagentsServiceAdapter["resume"]> | undefined;
+      const serviceRef: { current?: SubagentsServiceAdapter } = {};
+      const sideEffects = new SubagentEventsObserver({
+        emit: (channel) => {
+          eventsAt.push({ channel, leaf: branchIds.at(-1) });
+          if (channel !== "subagents:failed") return;
+          const service = serviceRef.current;
+          if (!service) throw new Error("service fixture was not initialized");
+          try {
+            service.spawn("Explore", "spawned by completion subscriber");
+          } catch (error) {
+            reentrantError = error;
+          }
+          reentrantResume = service.resume(siblingId, "resume from completion subscriber");
+        },
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      const manager = createManager({
+        createSubagentSession: vi.fn(async () => toSubagentSession(siblingSession)),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.registerWorkspaceProvider(makeWorkspaceProvider(workspace));
+      manager.activate(parent.ctx);
+      serviceRef.current = new SubagentsServiceAdapter(
+        manager,
+        vi.fn(),
+        {
+          currentCtx: parent.ctx,
+          buildSnapshot: () => STUB_SNAPSHOT,
+          getSessionInfo: () => ({
+            parentSessionFile: "/sessions/parent.jsonl",
+            parentSessionId: "parent-session",
+            parentEntryId: branchIds.at(-1) ?? null,
+          }),
+        },
+      );
+      const siblingId = manager.spawn(STUB_SNAPSHOT, "Explore", "sibling", {
+        description: "old sibling agent",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "old-entry" },
+      });
+      await vi.waitFor(() => {
+        expect(siblingSession.runTurnLoop).toHaveBeenCalledOnce();
+      });
+
+      // The completion event is a synchronous cross-extension reentrancy point;
+      // it must not admit fresh old-leaf work after the departing snapshot.
+      const preparing = manager.prepareTreeTransition("shared-entry");
+      siblingGate.resolve();
+      await preparing;
+      expect(reentrantError).toEqual(
+        new Error("Cannot spawn a subagent while a parent session transition is in progress"),
+      );
+      await expect(reentrantResume).resolves.toEqual({
+        kind: "refused",
+        reason: "parent-transition",
+      });
+      expect(manager.listAgents().map((record) => record.id)).toEqual([siblingId]);
+      expect(siblingSession.dispose).toHaveBeenCalledOnce();
+      expect(workspace.suspend).toHaveBeenCalledOnce();
+      expect(eventsAt).toEqual([
+        { channel: "subagents:failed", leaf: "old-entry" },
+      ]);
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await manager.reconcileTree(parent.ctx);
+      expect(manager.getRecord(siblingId)).toBeUndefined();
+      expect(JSON.stringify(parent.read())).toContain(siblingId);
+      expect(eventsAt).toEqual([
+        { channel: "subagents:failed", leaf: "old-entry" },
+      ]);
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+    });
+
+    it("silently settles old-lineage work admitted after tree preparation", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const lateGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const lateSession = createSubagentSessionStub();
+      const workspace = makeWorkspace("/worktrees/late-sibling");
+      lateSession.runTurnLoop.mockImplementation(async () => {
+        await lateGate.promise;
+        return { responseText: "late sibling stopped", aborted: false, steered: false };
+      });
+      const eventsAt: Array<{ channel: string; leaf: string | undefined }> = [];
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      const sideEffects = new SubagentEventsObserver({
+        emit: (channel) => { eventsAt.push({ channel, leaf: branchIds.at(-1) }); },
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      let isCurrent: (() => boolean) | undefined;
+      const manager = createManager({
+        createSubagentSession: vi.fn(async (params) => {
+          isCurrent = params.isCurrent;
+          return toSubagentSession(lateSession);
+        }),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.registerWorkspaceProvider(makeWorkspaceProvider(workspace));
+      manager.activate(parent.ctx);
+      const service = new SubagentsServiceAdapter(
+        manager,
+        vi.fn(),
+        {
+          currentCtx: parent.ctx,
+          buildSnapshot: () => STUB_SNAPSHOT,
+          getSessionInfo: () => ({
+            parentSessionFile: "/sessions/parent.jsonl",
+            parentSessionId: "parent-session",
+            parentEntryId: branchIds.at(-1) ?? null,
+          }),
+        },
+      );
+
+      // Admission reopens after preparation because another extension can
+      // cancel navigation without emitting a matching completion event.
+      await manager.prepareTreeTransition("shared-entry");
+      const lateId = service.spawn("Explore", "admitted before tree commit");
+      await vi.waitFor(() => {
+        expect(lateSession.runTurnLoop).toHaveBeenCalledOnce();
+      });
+      expect(isCurrent?.()).toBe(true);
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      expect(isCurrent?.()).toBe(false);
+      expect(service.getRecord(lateId)).toBeUndefined();
+      expect(service.listAgents()).toEqual([]);
+      expect(service.abort(lateId)).toBe(false);
+      await expect(service.resume(lateId, "must stay hidden")).resolves.toEqual({
+        kind: "refused",
+        reason: "unknown-agent",
+      });
+      let reconciled = false;
+      const reconciling = manager.reconcileTree(parent.ctx).then(() => {
+        reconciled = true;
+      });
+      await Promise.resolve();
+      expect(reconciled).toBe(false);
+
+      lateGate.resolve();
+      await reconciling;
+      expect(manager.getRecord(lateId)).toBeUndefined();
+      expect(JSON.stringify(parent.read())).toContain(lateId);
+      expect(JSON.stringify(parent.read())).toContain('"status":"stopped"');
+      expect(lateSession.dispose).toHaveBeenCalledOnce();
+      expect(workspace.suspend).toHaveBeenCalledOnce();
+      expect(eventsAt).toEqual([]);
+      expect(appendedAt).toEqual([]);
+      expect(notifiedAt).toEqual([]);
+    });
+
+    it("refuses a resume whose session restoration crosses into a sibling branch", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const record = persistedRecord("restoring-agent", "old-entry");
+      const parent = parentState(
+        { version: 1, records: [record], tombstones: [] },
+        branchIds,
+      );
+      const restoreGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const restoredSession = createSubagentSessionStub();
+      const restoreSubagentSession = vi.fn<RestoreFactory>(async () => {
+        await restoreGate.promise;
+        return toSubagentSession(restoredSession);
+      });
+      const onSubagentResuming = vi.fn();
+      const onSubagentResumed = vi.fn();
+      const manager = createManager({
+        restoreSubagentSession,
+        observer: { onSubagentResuming, onSubagentResumed },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+      await manager.prepareTreeTransition("shared-entry");
+
+      // Restoration starts on the old leaf, but must revalidate lineage before
+      // it is allowed to start the resumed turn loop.
+      const resuming = manager.resume(record.id, "continue");
+      await vi.waitFor(() => {
+        expect(restoreSubagentSession).toHaveBeenCalledOnce();
+      });
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      let reconciled = false;
+      const reconciling = manager.reconcileTree(parent.ctx).then(() => {
+        reconciled = true;
+      });
+      await Promise.resolve();
+      expect(reconciled).toBe(false);
+      expect(manager.getRecord(record.id)).toBeUndefined();
+
+      restoreGate.resolve();
+      await expect(resuming).resolves.toEqual({
+        kind: "refused",
+        reason: "parent-transition",
+      });
+      await reconciling;
+      expect(restoredSession.resumeTurnLoop).not.toHaveBeenCalled();
+      expect(restoredSession.dispose).toHaveBeenCalledOnce();
+      expect(onSubagentResuming).not.toHaveBeenCalled();
+      expect(onSubagentResumed).not.toHaveBeenCalled();
+      expect(JSON.stringify(parent.read())).toContain(record.id);
+    });
+
+    it("reopens admission as soon as tree preparation settles", async () => {
+      const parent = parentState(undefined, ["shared-entry", "old-entry"]);
+      const manager = createManager({
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+
+      await manager.prepareTreeTransition("shared-entry");
+      expect(() => spawnBg(manager)).not.toThrow();
+    });
+  });
+
   describe("spawn", () => {
     let manager: SubagentManager;
 
@@ -1333,7 +2194,13 @@ describe("SubagentManager", () => {
     });
 
     function makeProvider(): WorkspaceProvider {
-      return { prepare: vi.fn(async () => undefined) };
+      return {
+        id: "test-workspace",
+        prepare: vi.fn(async () => undefined),
+        restore: vi.fn(async () => {
+          throw new Error("workspace unavailable");
+        }),
+      };
     }
 
     it("returns a disposer and exposes the registered provider via getter", () => {
@@ -1368,7 +2235,7 @@ describe("SubagentManager", () => {
       expect(manager.workspaceProvider).toBe(second);
     });
 
-    it("relays a held workspace's notice to the manager observer when the session is released", async () => {
+    it("does not repeat a terminal workspace checkpoint notice when the session is released", async () => {
       const onSubagentWorkspaceNotice = vi.fn<(record: Subagent, notice: string) => void>();
       const notice = "\n\n---\nChanges saved to branch `pi-agent-1`.";
       const stub = createSubagentSessionStub();
@@ -1385,10 +2252,19 @@ describe("SubagentManager", () => {
         observer: { onSubagentWorkspaceNotice },
       }));
       manager.registerWorkspaceProvider({
+        id: "test-workspace",
         prepare: vi.fn(async () => ({
           cwd: "/ws/dir",
+          snapshot: vi.fn(() => ({ cwd: "/ws/dir" })),
+          suspend: vi.fn(() => ({
+            state: { cwd: "/ws/dir" },
+            resultAddendum: notice,
+          })),
           dispose: vi.fn(() => ({ resultAddendum: notice })),
         })),
+        restore: vi.fn(async () => {
+          throw new Error("workspace unavailable");
+        }),
       });
 
       const id = manager.spawn(STUB_SNAPSHOT, "general-purpose", "test", {
@@ -1399,7 +2275,8 @@ describe("SubagentManager", () => {
       await record.promise;
       await record.releaseSession();
 
-      expect(onSubagentWorkspaceNotice).toHaveBeenCalledExactlyOnceWith(record, notice);
+      expect(record.result).toContain(notice);
+      expect(onSubagentWorkspaceNotice).not.toHaveBeenCalled();
     });
 
     it("stale disposer does not evict a later provider", () => {
@@ -1459,17 +2336,21 @@ describe("SubagentManager", () => {
         });
       });
 
-      it("reports a workspace torn down at run end, which the old guard let through", async () => {
+      it("restores a suspended workspace before resuming the child", async () => {
         const { factory } = createSessionFactory();
         ({ manager } = createManager({ createSubagentSession: factory }));
-        manager.registerWorkspaceProvider(makeWorkspaceProvider(makeWorkspace("/ws/dir")));
+        const provider = makeWorkspaceProvider(makeWorkspace("/ws/dir"));
+        manager.registerWorkspaceProvider(provider);
         const id = spawnBg(manager);
         await manager.getRecord(id)!.promise;
 
-        expect(await manager.resume(id, "continue")).toEqual({
-          kind: "refused",
-          reason: "workspace-disposed",
+        expect(await manager.resume(id, "continue")).toMatchObject({
+          kind: "resumed",
         });
+        expect(provider.restore).toHaveBeenCalledWith(
+          expect.objectContaining({ agentId: id }),
+          { cwd: "/ws/dir" },
+        );
       });
 
       it("starts no turn loop for a refused resume", async () => {

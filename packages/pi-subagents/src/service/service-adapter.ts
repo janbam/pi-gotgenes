@@ -40,7 +40,11 @@ export interface ServiceRuntimeLike {
   readonly currentCtx: SessionContext | undefined;
   buildSnapshot(inheritContext: boolean): ParentSnapshot;
   /** Parent session identity, so an SDK-spawned child nests under its parent. */
-  getSessionInfo(): { parentSessionFile: string; parentSessionId: string };
+  getSessionInfo(): {
+    parentSessionFile: string;
+    parentSessionId: string;
+    parentEntryId: string | null;
+  };
 }
 
 /** Adapter that wraps SubagentManager to satisfy SubagentsService. */
@@ -60,13 +64,14 @@ export class SubagentsServiceAdapter implements SubagentsService {
     const description = options?.description ?? prompt.slice(0, 80);
 
     const snapshot = this.runtime.buildSnapshot(options?.inheritContext ?? false);
-    const { parentSessionFile, parentSessionId } = this.runtime.getSessionInfo();
+    const { parentSessionFile, parentSessionId, parentEntryId } =
+      this.runtime.getSessionInfo();
     return this.manager.spawn(snapshot, type, prompt, {
       description,
       model,
       // No toolCallId — an SDK spawn has no originating tool call, and
       // Subagent.toolCallId reporting undefined there is the truth.
-      parentSession: { parentSessionFile, parentSessionId },
+      parentSession: { parentSessionFile, parentSessionId, parentEntryId },
       maxTurns: options?.maxTurns,
       thinkingLevel: this.resolveThinkingLevel(options?.thinkingLevel),
       inheritContext: options?.inheritContext,

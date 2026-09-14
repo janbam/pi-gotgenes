@@ -9,13 +9,25 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { debugLog } from "#src/debug";
-import type { CreateSubagentSessionParams } from "#src/lifecycle/create-subagent-session";
+import {
+	type CreateSubagentSessionParams,
+	type RestoreSubagentSessionParams,
+	SubagentSessionRestoreError,
+} from "#src/lifecycle/create-subagent-session";
 import type { ParentSnapshot } from "#src/lifecycle/parent-snapshot";
 import { RunListeners } from "#src/lifecycle/run-listeners";
+import type {
+	PersistedSubagentRecord,
+	PersistedSubagentSession,
+	PersistedWorkspace,
+} from "#src/lifecycle/subagent-persistence";
 import type { SubagentSession, TurnLoopResult } from "#src/lifecycle/subagent-session";
 import { SubagentState, type SubagentStatus } from "#src/lifecycle/subagent-state";
 import type { LifetimeUsage } from "#src/lifecycle/usage";
-import type { WorkspaceProvider } from "#src/lifecycle/workspace";
+import {
+	type WorkspaceProvider,
+	WorkspaceRestoreError,
+} from "#src/lifecycle/workspace";
 import { WorkspaceBracket } from "#src/lifecycle/workspace-bracket";
 import { subscribeSubagentObserver } from "#src/observation/record-observer";
 import type { RunConfig } from "#src/runtime";
@@ -47,6 +59,8 @@ export interface SubagentLifecycleObserver {
 	onWorkspaceNotice?(agent: Subagent, notice: string): void;
 	/** Fires on compaction events during the run. */
 	onCompacted?(agent: Subagent, info: CompactionInfo): void;
+	/** Fires after durable state changes that have no dedicated lifecycle edge. */
+	onStateChanged?(agent: Subagent): void;
 }
 
 export type { SubagentStatus } from "#src/lifecycle/subagent-state";
@@ -66,7 +80,9 @@ export type ResumeRefusal =
 	| "still-running"
 	| "no-session"
 	| "session-released"
-	| "workspace-disposed";
+	| "workspace-disposed"
+	| "unavailable"
+	| "incompatible";
 
 /**
  * The result of a steer attempt. `Subagent.steer` owns the non-running
@@ -87,12 +103,16 @@ export type SteerOutcome =
 export interface SubagentExecution {
 	/** Assembly factory that produces a born-complete SubagentSession. */
 	createSubagentSession: (params: CreateSubagentSessionParams) => Promise<SubagentSession>;
+	/** Reopens a persisted child after memory release or parent-session activation. */
+	restoreSubagentSession?: (params: RestoreSubagentSessionParams) => Promise<SubagentSession>;
 	/** Immutable spawn-time parent snapshot handed to the session factory. */
 	snapshot: ParentSnapshot;
 	/** Initial prompt for the turn loop. */
 	prompt: string;
 	/** Parent working directory handed to a workspace provider's prepare(). */
 	baseCwd: string;
+	/** Live lineage predicate applied at asynchronous child-session boundaries. */
+	isCurrent?: (agent: Subagent) => boolean;
 	observer?: SubagentLifecycleObserver;
 	getRunConfig?: () => RunConfig;
 	/** Resolves the registered workspace provider (if any) at run-start. */
@@ -117,6 +137,12 @@ export interface SubagentInit {
 
 	/** Lifecycle status and metrics. Defaults to a fresh queued state. */
 	state?: SubagentState;
+	/** Parent conversation leaf visible at spawn; null is the session root. */
+	parentEntryId?: string | null;
+	/** Existing child specification supplied when hydrating a durable record. */
+	resumeSpec?: PersistedSubagentSession;
+	/** Provider-owned checkpoint supplied when hydrating an isolated workspace. */
+	workspace?: PersistedWorkspace;
 }
 
 export class Subagent {
@@ -173,6 +199,7 @@ export class Subagent {
 	private readonly execution: SubagentExecution;
 	private readonly listeners = new RunListeners();
 	private readonly workspaceBracket: WorkspaceBracket;
+	readonly parentEntryId: string | null;
 
 	subagentSession?: SubagentSession;
 
@@ -181,6 +208,9 @@ export class Subagent {
 	// "never had a session."
 	private _releasedOutputFile?: string;
 	private _sessionReleased = false;
+	private _resumeSpec?: PersistedSubagentSession;
+	private _restoreRefusal?: "unavailable" | "incompatible";
+	private restoringSession = false;
 	/** True once releaseSession() has freed a live session (distinct from never having had one). */
 	get sessionReleased(): boolean { return this._sessionReleased; }
 
@@ -202,7 +232,7 @@ export class Subagent {
 	 * Falls back to the path captured at releaseSession() once the live session is gone.
 	 */
 	get outputFile(): string | undefined {
-		return this.subagentSession?.outputFile ?? this._releasedOutputFile;
+		return this.subagentSession?.outputFile ?? this._resumeSpec?.outputFile ?? this._releasedOutputFile;
 	}
 
 	/** The tool call ID that spawned this background agent, if any. */
@@ -234,8 +264,11 @@ export class Subagent {
 		// its session, and "still running" describes that record better than "no
 		// session" does. A queued agent is not running and keeps the no-session
 		// answer, which is the truth about it.
-		if (this.isRunning()) return "still-running";
-		if (!this.isSessionReady()) return this._sessionReleased ? "session-released" : "no-session";
+		if (this.isRunning() || this.restoringSession) return "still-running";
+		if (this._restoreRefusal) return this._restoreRefusal;
+		if (!this.isSessionReady() && !this._resumeSpec) {
+			return this._sessionReleased ? "session-released" : "no-session";
+		}
 		if (this.workspaceDisposed) return "workspace-disposed";
 		return undefined;
 	}
@@ -297,6 +330,7 @@ export class Subagent {
 		this.type = init.type;
 		this.description = init.description;
 		this.isBackground = init.isBackground;
+		this.parentEntryId = init.parentEntryId ?? null;
 
 		// Lifecycle status and metrics — fresh queued state unless one is supplied
 		this.state = init.state ?? new SubagentState();
@@ -306,10 +340,14 @@ export class Subagent {
 
 		// Execution machinery — a single mandatory collaborator
 		this.execution = init.execution;
+		this._resumeSpec = init.resumeSpec;
+		this._releasedOutputFile = init.resumeSpec?.outputFile;
+		this._sessionReleased = init.resumeSpec !== undefined;
 
 		// Per-run lifecycle collaborators
 		this.workspaceBracket = new WorkspaceBracket(
 			this.execution.getWorkspaceProvider ?? (() => undefined),
+			init.workspace,
 		);
 	}
 
@@ -338,6 +376,7 @@ export class Subagent {
 					agentType: this.type,
 					baseCwd: this.execution.baseCwd,
 				});
+				this.execution.observer?.onStateChanged?.(this);
 			} catch (err) {
 				this.markError(err);
 				this.listeners.release();
@@ -351,11 +390,12 @@ export class Subagent {
 			this.subagentSession = await this.execution.createSubagentSession({
 				snapshot: this.execution.snapshot,
 				type: this.type,
+				isCurrent: () => this.execution.isCurrent?.(this) ?? true,
 				cwd,
 				parentSession: this.execution.parentSession,
 				model: this.execution.model,
 				thinkingLevel: this.execution.thinkingLevel,
-				askParent: (question) => { this.state.setPendingQuestion(question); },
+				askParent: (question) => { this.setPendingQuestion(question); },
 				notifyParent: this.canSendUpdates(runConfig)
 					? (message) => { this.announceUpdate(message); }
 					: undefined,
@@ -367,6 +407,8 @@ export class Subagent {
 		}
 
 		this.flushPendingSteers();
+		this._resumeSpec = this.subagentSession.resumeSpec;
+		this._sessionReleased = false;
 		this.listeners.attachObserver(subscribeSubagentObserver(this.subagentSession, this.state, {
 			onCompact: (info) => this.execution.observer?.onCompacted?.(this, info),
 		}));
@@ -484,6 +526,67 @@ export class Subagent {
 		return this._promise;
 	}
 
+	/** Lazily reopen a released child before the manager starts its resumed turn. */
+	// Restoration is one policy funnel: splitting its refusal and cleanup branches
+	// would hide the invariant that every acquired resource leaves through here.
+	// fallow-ignore-next-line complexity
+	async prepareResume(): Promise<ResumeRefusal | undefined> {
+		const currentRefusal = this.resumeRefusal;
+		if (
+			currentRefusal &&
+			currentRefusal !== "session-released" &&
+			currentRefusal !== "unavailable" &&
+			currentRefusal !== "incompatible"
+		) {
+			return currentRefusal;
+		}
+
+		this.restoringSession = true;
+		this._restoreRefusal = undefined;
+		try {
+			// Restore the exact working directory before reopening the SDK session,
+			// whose persisted resource configuration points at that directory.
+			await this.workspaceBracket.restore({
+				agentId: this.id,
+				agentType: this.type,
+				baseCwd: this.execution.baseCwd,
+			});
+			this.execution.observer?.onStateChanged?.(this);
+			if (this.subagentSession) return undefined;
+			if (!this._resumeSpec || !this.execution.restoreSubagentSession) {
+				return currentRefusal ?? "no-session";
+			}
+
+			const runConfig = this.execution.getRunConfig?.();
+			this.subagentSession = await this.execution.restoreSubagentSession({
+				spec: this._resumeSpec,
+				type: this.type,
+				isCurrent: () => this.execution.isCurrent?.(this) ?? true,
+				modelRegistry: this.execution.snapshot.modelRegistry,
+				parentSessionId: this.execution.parentSession?.parentSessionId,
+				askParent: (question) => { this.setPendingQuestion(question); },
+				notifyParent: this.canSendUpdates(runConfig)
+					? (message) => { this.announceUpdate(message); }
+					: undefined,
+			});
+			this._sessionReleased = false;
+			this._restoreRefusal = undefined;
+			this.execution.observer?.onSessionCreated?.(this);
+			return undefined;
+		} catch (err) {
+			// A failed session reopen must not leave the reconstructed workspace
+			// live when no resumed turn can own it.
+			this.suspendWorkspaceQuietly(this.status);
+			this._restoreRefusal = err instanceof SubagentSessionRestoreError || err instanceof WorkspaceRestoreError
+				? err.reason
+				: "unavailable";
+			this.execution.observer?.onStateChanged?.(this);
+			return this._restoreRefusal;
+		} finally {
+			this.restoringSession = false;
+		}
+	}
+
 	/** The resume body. Always resolves — errors terminate through failResume(). */
 	private async runResume(subagentSession: SubagentSession, prompt: string, signal?: AbortSignal): Promise<void> {
 		this.resetForResume(Date.now());
@@ -499,24 +602,23 @@ export class Subagent {
 		}
 	}
 
-	/** Terminate a resume as completed: mark, dispose or hold the workspace, release listeners, notify observer. */
+	/** Terminate a resume as completed: checkpoint the workspace, release listeners, notify observer. */
 	completeResume(result: string): void {
-		// A child answering one question may need to ask another, which holds the
-		// workspace for the next resume the same way the original run did.
-		const finalResult = this.pendingQuestion !== undefined
-			? result
-			: result + this.workspaceBracket.dispose({ status: "completed", description: this.description });
+		const finalResult = result + this.workspaceBracket.suspend({
+			status: "completed",
+			description: this.description,
+		});
 		this.markCompleted(finalResult);
 		this.listeners.release();
 		this.execution.observer?.onResumeFinished?.(this);
 	}
 
-	/** Terminate a resume as errored: mark, release listeners, best-effort workspace dispose, notify observer. */
+	/** Terminate a resume as errored: mark, release listeners, best-effort workspace suspend, notify observer. */
 	failResume(err: unknown): void {
 		this.markError(err);
 		this.clearPendingQuestion();
 		this.listeners.release();
-		this.disposeWorkspaceQuietly("error");
+		this.suspendWorkspaceQuietly("error");
 		this.execution.observer?.onResumeFinished?.(this);
 	}
 
@@ -565,11 +667,13 @@ export class Subagent {
 	/** Record the parent collected this agent's outcome. Idempotent. */
 	markConsumed(at?: number): void {
 		this.state.markConsumed(at);
+		this.execution.observer?.onStateChanged?.(this);
 	}
 
 	/** The announcement channel delivered this update; no outcome carrier repeats it. */
 	markUpdateAnnounced(message: string): void {
 		this.state.markUpdateAnnounced(message);
+		this.execution.observer?.onStateChanged?.(this);
 	}
 
 	/** A carrier has committed to delivering this outcome; nothing else announces it. */
@@ -635,7 +739,7 @@ export class Subagent {
 		this.listeners.release();
 	}
 
-	/** Complete a run: release listeners, dispose the workspace, status transition, notify observer. */
+	/** Complete a run: release listeners, checkpoint the workspace, transition, notify observer. */
 	completeRun(result: TurnLoopResult): void {
 		this.listeners.release();
 
@@ -644,15 +748,10 @@ export class Subagent {
 			: result.steered
 				? "steered"
 				: "completed";
-		// A completed child that declared a question is inviting a resume, so its
-		// workspace stays live for the resume to re-enter. Every other outcome ends
-		// the run for good and tears it down here. The question was recorded by
-		// ask_parent during the run, so it is already on the record here.
-		const holdForResume = finalStatus === "completed" && this.pendingQuestion !== undefined;
-		const finalResult = holdForResume
-			? result.responseText
-			: result.responseText +
-				this.workspaceBracket.dispose({ status: finalStatus, description: this.description });
+		const finalResult = result.responseText + this.workspaceBracket.suspend({
+			status: finalStatus,
+			description: this.description,
+		});
 
 		if (result.aborted) this.markAborted(finalResult);
 		else if (result.steered) this.markSteered(finalResult);
@@ -683,19 +782,21 @@ export class Subagent {
 	async releaseSession(): Promise<void> {
 		const session = this.subagentSession;
 		if (!session) return;
-		this.disposeHeldWorkspace();
+		this.suspendHeldWorkspace();
 		this._releasedOutputFile = session.outputFile;
+		this._resumeSpec = session.resumeSpec ?? this._resumeSpec;
 		this.subagentSession = undefined;
 		this._sessionReleased = true;
 		await disposeQuietly(session, "child session release");
+		this.execution.observer?.onStateChanged?.(this);
 	}
 
-	/** Fail a run: mark error, release listeners, best-effort workspace dispose, notify observer. */
+	/** Fail a run: mark error, release listeners, best-effort workspace suspend, notify observer. */
 	failRun(err: unknown): void {
 		this.markError(err);
 		this.clearPendingQuestion();
 		this.listeners.release();
-		this.disposeWorkspaceQuietly("error");
+		this.suspendWorkspaceQuietly("error");
 		this.execution.observer?.onRunFinished?.(this);
 	}
 
@@ -708,7 +809,47 @@ export class Subagent {
 	 * those reached a terminal transition with an outcome to report.
 	 */
 	private clearPendingQuestion(): void {
-		this.state.setPendingQuestion(undefined);
+		this.setPendingQuestion(undefined);
+	}
+
+	/** Record a child question and persist it even when no terminal edge follows yet. */
+	private setPendingQuestion(question: string | undefined): void {
+		this.state.setPendingQuestion(question);
+		this.execution.observer?.onStateChanged?.(this);
+	}
+
+	/** Capture this record for the parent session's durable registry. */
+	toPersistedRecord(): PersistedSubagentRecord {
+		return {
+			id: this.id,
+			type: this.type,
+			description: this.description,
+			isBackground: this.isBackground,
+			toolCallId: this.toolCallId,
+			parentEntryId: this.parentEntryId,
+			state: this.state.snapshot(),
+			session: this.subagentSession?.resumeSpec ?? this._resumeSpec,
+			workspace: this.workspaceBracket.snapshot(),
+		};
+	}
+
+	/** Suspend a terminal workspace before releasing its in-memory child session. */
+	private suspendHeldWorkspace(): void {
+		if (this.isActive()) return;
+		const notice = this.suspendWorkspaceQuietly(this.status);
+		if (notice) this.execution.observer?.onWorkspaceNotice?.(this, notice);
+	}
+
+	/** Suspend a workspace without letting provider cleanup failure hide the child outcome. */
+	private suspendWorkspaceQuietly(status: SubagentStatus): string {
+		try {
+			const notice = this.workspaceBracket.suspend({ status, description: this.description });
+			if (notice) this.state.setWorkspaceNotice(notice);
+			return notice;
+		} catch (err) {
+			debugLog(`workspace suspend (${status})`, err);
+			return "";
+		}
 	}
 
 	/**

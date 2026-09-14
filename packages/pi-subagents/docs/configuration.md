@@ -204,7 +204,8 @@ Two names are always **added**, whatever an agent lists: `ask_parent` and `notif
 These are the child's channel back to the agent that delegated to it — protocol the core installs in every child, like the `<active_agent>` tag and the parent-context prefix.
 Neither reaches the filesystem, the shell, or the network, so a read-only agent stays read-only.
 `ask_parent` records a question and tells the child to end its turn, so the delegating agent can answer by resuming it; `notify_parent` sends a one-way update and returns at once.
-A question outlives the window in which it can be answered — the session is released after its retention window, and a workspace is torn down at run end unless the child completed — so once a resume would be refused, the result reports the question and the reason rather than the `resume` call.
+A question remains answerable after the live session's retention window: the same ID lazily reopens its persisted child transcript, and a matching workspace provider reconstructs any isolated workspace first.
+When an external deletion or incompatible runtime makes that impossible, the result reports the stable refusal reason rather than a `resume` call that would fail.
 Both go to every agent, `notify_parent` only while [`midRunUpdates`](#persistent-settings) is on.
 Where an update lands depends on whether an announcement can still reach you in time to act on it.
 It arrives as its own message when you are idle and the agent is still running — the one case where steering it is still possible.
@@ -234,8 +235,10 @@ Two other settings interact with this list:
 ## Persistent Settings
 
 Runtime tuning values set via `/subagents:settings` (max concurrency, default max turns, grace turns, the two session-retention windows, the abort-on-interrupt policy, and the mid-run update channel) persist across pi restarts.
-A completed subagent's record is kept for the whole parent session (so `get_subagent_result` never misses); only its heavy in-memory session is released — after `consumedSessionRetentionMinutes` once the result has been collected, or after the `unconsumedSessionRetentionMinutes` safety cap if it never was.
-An agent that asked a question and has not been answered holds the safety cap rather than the consumed window, because reading a question is not finishing with the agent — the answer is delivered by resuming the very session the short window would release.
+A completed subagent's durable record is kept for the whole parent-session lineage, including compaction, reopening, and switching away and back.
+Only its heavy in-memory SDK session is released — after `consumedSessionRetentionMinutes` once the result has been collected, or after the `unconsumedSessionRetentionMinutes` safety cap if it never was.
+The next resume reopens the persisted transcript, so these settings control memory use rather than handle validity.
+An unanswered question still uses the longer window to avoid needless session reconstruction during an active exchange.
 
 Set `midRunUpdates` to `false` to withhold `notify_parent` from every agent, leaving them no way to tell you anything before they finish.
 `ask_parent` is unaffected: a blocked agent can still end its turn with a question.

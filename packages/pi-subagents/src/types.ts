@@ -3,7 +3,11 @@
  */
 
 import type { Model } from "@earendil-works/pi-ai";
-import type { AgentSessionEvent, SessionContext as SdkSessionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentSessionEvent,
+  JsonValue,
+  SessionContext as SdkSessionContext,
+} from "@earendil-works/pi-coding-agent";
 import type { LockDeclaration } from "#src/config/invocation-config";
 import type { SubagentThinkingLevel } from "#src/config/thinking-level";
 import type { ModelRegistry } from "#src/session/model-resolver";
@@ -115,7 +119,9 @@ export interface SessionContext {
   readonly sessionManager: {
     getSessionFile(): string | undefined;
     getSessionId(): string;
+    getLeafId(): string | null;
     getBranch(): unknown[];
+    getSessionState<T extends JsonValue = JsonValue>(key: string): T | undefined;
   };
 }
 
@@ -135,6 +141,8 @@ export interface ParentSessionInfo {
 	parentSessionFile?: string;
 	/** Session ID of the parent agent (stored in the child session's parentSession header). */
 	parentSessionId?: string;
+	/** Parent conversation leaf visible when the child was spawned. */
+	parentEntryId?: string | null;
 	/** Tool call ID for background notification wiring. Exposed on the record via Subagent.toolCallId. */
 	toolCallId?: string;
 }

@@ -276,9 +276,9 @@ describe("NotificationManager", () => {
     expect(content).toContain('resume: "agent-3"');
   });
 
-  it("reports a question the torn-down workspace can no longer answer, without a resume call", async () => {
-    // An aborted child keeps its question but does not hold its workspace, so
-    // the disposal is driven by the production path rather than seeded state.
+  it("reports a question with a resume call after its workspace was checkpointed", async () => {
+    // An aborted child keeps both its question and a reconstructible workspace,
+    // so the production path must preserve the resume affordance.
     const stub = createSubagentSessionStub();
     let askParent: ((question: string) => void) | undefined;
     stub.runTurnLoop.mockImplementation(() => {
@@ -297,7 +297,7 @@ describe("NotificationManager", () => {
     });
     await disposed.run();
     expect(disposed.pendingQuestion).toBe("Which config?");
-    expect(disposed.workspaceDisposed).toBe(true);
+    expect(disposed.workspaceDisposed).toBe(false);
     const args = makeArgs();
     const system = makeManager(args);
 
@@ -305,8 +305,7 @@ describe("NotificationManager", () => {
 
     const content = (args.sendMessage.mock.calls[0][0] as { content: string }).content;
     expect(content).toContain("Which config?");
-    expect(content).toContain("it ran in an isolated workspace that has since been removed");
-    expect(content).not.toContain("resume:");
+    expect(content).toContain('resume: "agent-3"');
   });
 
   it("names where a teardown saved the agent's work", () => {

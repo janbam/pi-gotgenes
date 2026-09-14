@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CreateSessionOptions } from "#src/lifecycle/create-subagent-session";
-import { createSubagentSession } from "#src/lifecycle/create-subagent-session";
+import {
+  createSubagentSession,
+  restoreSubagentSession,
+  SubagentSessionRestoreError,
+} from "#src/lifecycle/create-subagent-session";
+import type { PersistedSubagentSession } from "#src/lifecycle/subagent-persistence";
 import { SubagentSession } from "#src/lifecycle/subagent-session";
+import { makeModel } from "#test/helpers/make-model";
 import { STUB_CTX, STUB_SNAPSHOT } from "#test/helpers/stub-ctx";
 import {
   createAgentLookup,
@@ -59,6 +65,42 @@ describe("createSubagentSession — assembly", () => {
     );
 
     expect(sub.outputFile).toBe("/sessions/child.jsonl");
+  });
+
+  it("captures the exact effective inputs needed to reopen the child", async () => {
+    const model = makeModel({ id: "persisted-model" });
+    const snapshot = {
+      ...STUB_SNAPSHOT,
+      model,
+      parentContext: "Inherited conversation\n\n",
+    };
+
+    const sub = await createSubagentSession(
+      {
+        snapshot,
+        type: "Explore",
+        thinkingLevel: "high",
+        parentSession: { parentSessionId: "parent-1" },
+      },
+      createSubagentSessionDeps({
+        io,
+        exec,
+        registry: createAgentLookup({ maxTurns: 7 }),
+      }),
+    );
+
+    expect(sub.resumeSpec).toEqual({
+      outputFile: "/sessions/child.jsonl",
+      sessionId: "child-session-id",
+      sessionDir: "/mock/session-dir/tasks",
+      effectiveCwd: "/test",
+      systemPrompt: "system prompt",
+      toolNames: ["read"],
+      model: { provider: "anthropic", id: "persisted-model" },
+      thinkingLevel: "high",
+      agentMaxTurns: 7,
+      parentContext: "Inherited conversation\n\n",
+    });
   });
 
   it("binds extensions before returning", async () => {
@@ -243,6 +285,65 @@ describe("createSubagentSession — lifecycle ordering", () => {
 
     expect(lifecycle.completed).not.toHaveBeenCalled();
     expect(lifecycle.disposed).not.toHaveBeenCalled();
+  });
+
+  it("abandons delayed SDK creation when the parent lineage changed", async () => {
+    const creationGate = Promise.withResolvers<{ session: ReturnType<typeof createFactorySession> }>();
+    let current = true;
+    io.createSession.mockReturnValue(creationGate.promise);
+    const pending = createSubagentSession(
+      {
+        snapshot: STUB_SNAPSHOT,
+        type: "Explore",
+        isCurrent: () => current,
+      },
+      createSubagentSessionDeps({ io, exec, registry: mockAgentLookup, lifecycle }),
+    );
+    await vi.waitFor(() => {
+      expect(io.createSession).toHaveBeenCalledOnce();
+    });
+
+    // The SDK session crossed the branch commit, so dispose it before any
+    // externally paired child-registration event can escape.
+    current = false;
+    creationGate.resolve({ session });
+    await expect(pending).rejects.toThrow(
+      "Subagent no longer belongs to the active parent lineage",
+    );
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(lifecycle.sessionCreated).not.toHaveBeenCalled();
+    expect(lifecycle.bound).not.toHaveBeenCalled();
+    expect(lifecycle.completed).not.toHaveBeenCalled();
+    expect(lifecycle.disposed).not.toHaveBeenCalled();
+  });
+
+  it("disposes a registered child when extension binding crosses the lineage", async () => {
+    const bindingGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+    let current = true;
+    session.bindExtensions.mockReturnValue(bindingGate.promise);
+    const pending = createSubagentSession(
+      {
+        snapshot: STUB_SNAPSHOT,
+        type: "Explore",
+        isCurrent: () => current,
+      },
+      createSubagentSessionDeps({ io, exec, registry: mockAgentLookup, lifecycle }),
+    );
+    await vi.waitFor(() => {
+      expect(lifecycle.sessionCreated).toHaveBeenCalledOnce();
+    });
+
+    // session-created already registered the child synchronously. Preserve its
+    // disposal pair, but publish neither bound nor a runnable child afterward.
+    current = false;
+    bindingGate.resolve();
+    await expect(pending).rejects.toThrow(
+      "Subagent no longer belongs to the active parent lineage",
+    );
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(lifecycle.bound).not.toHaveBeenCalled();
+    expect(lifecycle.completed).not.toHaveBeenCalled();
+    expect(lifecycle.disposed).toHaveBeenCalledOnce();
   });
 });
 
@@ -454,5 +555,103 @@ describe("createSubagentSession — prompt inheritance", () => {
     );
 
     expect(inheritedArgument()?.strategy).toBe("portable");
+  });
+});
+
+describe("restoreSubagentSession", () => {
+  const spec: PersistedSubagentSession = {
+    outputFile: "/sessions/child.jsonl",
+    sessionId: "child-session-id",
+    sessionDir: "/sessions/tasks",
+    effectiveCwd: "/saved/worktree",
+    systemPrompt: "Persisted system prompt",
+    toolNames: ["read", "grep"],
+    model: { provider: "anthropic", id: "saved-model" },
+    thinkingLevel: "high",
+    agentMaxTurns: 9,
+    parentContext: "Original parent context\n\n",
+  };
+
+  it("opens the persisted child and activates it through the shared pipeline", async () => {
+    const model = makeModel({ id: "saved-model" });
+    const modelRegistry = {
+      find: vi.fn(() => model),
+      getAll: vi.fn(() => [model]),
+      getAvailable: vi.fn(() => [model]),
+    };
+    const session = arrangeFactory();
+
+    const restored = await restoreSubagentSession(
+      { spec, type: "Explore", modelRegistry, parentSessionId: "parent-2" },
+      defaultDeps(),
+    );
+
+    expect(io.openSessionManager).toHaveBeenCalledWith(
+      "/sessions/child.jsonl",
+      "/sessions/tasks",
+      "/saved/worktree",
+    );
+    expect(io.createSessionManager).not.toHaveBeenCalled();
+    expect(io.detectEnv).not.toHaveBeenCalled();
+    expect(io.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: "/saved/worktree",
+        model,
+        tools: ["read", "grep"],
+        thinkingLevel: "high",
+      }),
+    );
+    expect(session.bindExtensions).toHaveBeenCalledWith({});
+    expect(restored.resumeSpec).toEqual(spec);
+  });
+
+  it("rebuilds resources from the persisted effective prompt and cwd", async () => {
+    const model = makeModel({ id: "saved-model" });
+    arrangeFactory();
+
+    await restoreSubagentSession(
+      {
+        spec,
+        type: "Explore",
+        modelRegistry: {
+          find: () => model,
+          getAll: () => [model],
+          getAvailable: () => [model],
+        },
+      },
+      defaultDeps(),
+    );
+
+    const loaderOptions = io.createResourceLoader.mock.calls[0][0];
+    expect(loaderOptions.cwd).toBe("/saved/worktree");
+    expect(loaderOptions.systemPromptOverride?.()).toBe("Persisted system prompt");
+  });
+
+  it("fails as unavailable before opening when the transcript is missing", async () => {
+    io.fileExists.mockReturnValue(false);
+
+    await expect(
+      restoreSubagentSession(
+        { spec, type: "Explore", modelRegistry: STUB_SNAPSHOT.modelRegistry },
+        defaultDeps(),
+      ),
+    ).rejects.toMatchObject({
+      reason: "unavailable",
+    } satisfies Partial<SubagentSessionRestoreError>);
+    expect(io.openSessionManager).not.toHaveBeenCalled();
+  });
+
+  it("fails as incompatible when the exact persisted model is unavailable", async () => {
+    arrangeFactory();
+
+    await expect(
+      restoreSubagentSession(
+        { spec, type: "Explore", modelRegistry: STUB_SNAPSHOT.modelRegistry },
+        defaultDeps(),
+      ),
+    ).rejects.toMatchObject({
+      reason: "incompatible",
+    } satisfies Partial<SubagentSessionRestoreError>);
+    expect(io.openSessionManager).not.toHaveBeenCalled();
   });
 });

@@ -9,7 +9,7 @@
  * Commands:
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAgentSession,
@@ -27,7 +27,11 @@ import { loadCustomAgents } from "#src/config/custom-agents";
 import { InterruptHandler, SessionLifecycleHandler, WidgetEventsHandler } from "#src/handlers/index";
 import { createChildLifecyclePublisher } from "#src/lifecycle/child-lifecycle";
 import { ConcurrencyLimiter } from "#src/lifecycle/concurrency-limiter";
-import { createSubagentSession, type SubagentSessionDeps } from "#src/lifecycle/create-subagent-session";
+import {
+  createSubagentSession,
+  restoreSubagentSession,
+  type SubagentSessionDeps,
+} from "#src/lifecycle/create-subagent-session";
 import { SubagentManager } from "#src/lifecycle/subagent-manager";
 import { CompositeSubagentObserver } from "#src/observation/composite-subagent-observer";
 import {
@@ -119,6 +123,9 @@ export default function (pi: ExtensionAPI) {
       createResourceLoader: (opts) => new DefaultResourceLoader(opts),
       deriveSessionDir: deriveSubagentSessionDir,
       createSessionManager: (cwd, dir) => SessionManager.create(cwd, dir),
+      openSessionManager: (outputFile, sessionDir, cwdOverride) =>
+        SessionManager.open(outputFile, sessionDir, cwdOverride),
+      fileExists: existsSync,
       createSettingsManager: (cwd, dir) => SdkSettingsManager.create(cwd, dir),
       // The exclusion policy is resolved here, at the composition root, so the
       // assembly factory stays free of it and gets a ready-made settings view.
@@ -181,12 +188,15 @@ export default function (pi: ExtensionAPI) {
 
   const manager = new SubagentManager({
     createSubagentSession: (params) => createSubagentSession(params, subagentSessionDeps),
+    restoreSubagentSession: (params) =>
+      restoreSubagentSession(params, subagentSessionDeps),
     baseCwd: process.cwd(),
     observer,
     limiter,
     getRunConfig: () => settings,
     getRetentionPolicy: () => settings,
     registry,
+    writeSessionState: (key, value) => pi.setSessionState(key, value),
   });
 
   // Typed service published via Symbol.for() for cross-extension access.
@@ -214,6 +224,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => lifecycle.handleSessionStart(event, ctx));
   pi.on("session_start", (event, ctx) => widgetEvents.handleSessionStart(event, ctx));
   pi.on("session_before_switch", () => lifecycle.handleSessionBeforeSwitch());
+  pi.on("session_before_tree", (event) => lifecycle.handleSessionBeforeTree(event));
+  pi.on("session_tree", (event, ctx) => lifecycle.handleSessionTree(event, ctx));
   pi.on("session_shutdown", () => lifecycle.handleSessionShutdown());
   // Registered after the lifecycle handler on purpose. Pi awaits an extension's
   // handlers for an event in registration order, so the widget is torn down once
@@ -271,6 +283,7 @@ export default function (pi: ExtensionAPI) {
         registry,
         cwd: ctx.cwd,
         readFile: (path) => readFileSync(path, "utf8"),
+        abort: (id) => manager.abort(id),
       });
     },
   });

@@ -57,6 +57,119 @@ describe("WorkspaceBracket — prepare", () => {
 		await bracket.prepare(ctx);
 		expect(provider.prepare).toHaveBeenCalledWith(ctx);
 	});
+
+	it("captures provider-owned JSON while the workspace is live", async () => {
+		const workspace = makeWorkspace("/ws/dir");
+		const bracket = new WorkspaceBracket(() => makeWorkspaceProvider(workspace));
+
+		await bracket.prepare(ctx);
+
+		expect(bracket.snapshot()).toEqual({
+			providerId: "test-workspace",
+			state: { cwd: "/ws/dir" },
+		});
+	});
+});
+
+describe("WorkspaceBracket — restore", () => {
+	const persisted = {
+		providerId: "test-workspace",
+		state: { cwd: "/ws/dir", revision: "abc123" },
+	};
+
+	it("reconstructs the workspace through the matching provider", async () => {
+		const workspace = makeWorkspace("/ws/dir");
+		const provider = makeWorkspaceProvider(undefined, workspace);
+		const bracket = new WorkspaceBracket(() => provider, persisted);
+
+		await expect(bracket.restore(ctx)).resolves.toBe("/ws/dir");
+		expect(provider.restore).toHaveBeenCalledWith(ctx, persisted.state);
+	});
+
+	it("fails incompatibly when the required provider is absent", async () => {
+		const bracket = new WorkspaceBracket(() => undefined, persisted);
+
+		await expect(bracket.restore(ctx)).rejects.toMatchObject({
+			reason: "incompatible",
+		});
+	});
+
+	it("fails incompatibly when a different provider is registered", async () => {
+		const provider = {
+			...makeWorkspaceProvider(undefined),
+			id: "different-provider",
+		};
+		const bracket = new WorkspaceBracket(() => provider, persisted);
+
+		await expect(bracket.restore(ctx)).rejects.toMatchObject({
+			reason: "incompatible",
+		});
+	});
+
+	it("classifies an opaque provider restoration failure as unavailable", async () => {
+		const provider = makeWorkspaceProvider(undefined);
+		const bracket = new WorkspaceBracket(() => provider, persisted);
+
+		await expect(bracket.restore(ctx)).rejects.toMatchObject({
+			reason: "unavailable",
+		});
+	});
+});
+
+describe("WorkspaceBracket — suspend", () => {
+	const outcome = { status: "completed" as const, description: "test agent" };
+
+	it("releases the live workspace while retaining its provider checkpoint", async () => {
+		const workspace = makeWorkspace("/ws/dir", undefined, {
+			state: { cwd: "/ws/dir", revision: "def456" },
+			resultAddendum: "\n\n---\ncheckpointed",
+		});
+		const bracket = new WorkspaceBracket(() => makeWorkspaceProvider(workspace));
+		await bracket.prepare(ctx);
+
+		expect(bracket.suspend(outcome)).toBe("\n\n---\ncheckpointed");
+		expect(workspace.suspend).toHaveBeenCalledWith(outcome);
+		expect(bracket.snapshot()).toEqual({
+			providerId: "test-workspace",
+			state: { cwd: "/ws/dir", revision: "def456" },
+		});
+		expect(bracket.wasDisposed()).toBe(false);
+	});
+
+	it("suspends a live workspace only once", async () => {
+		const workspace = makeWorkspace("/ws/dir");
+		const bracket = new WorkspaceBracket(() => makeWorkspaceProvider(workspace));
+		await bracket.prepare(ctx);
+
+		bracket.suspend(outcome);
+		expect(bracket.suspend(outcome)).toBe("");
+		expect(workspace.suspend).toHaveBeenCalledOnce();
+	});
+
+	it("keeps the identity of the provider that prepared the workspace", async () => {
+		const workspace = makeWorkspace("/ws/dir");
+		const firstProvider = {
+			...makeWorkspaceProvider(workspace),
+			id: "first-provider",
+		};
+		const replacementProvider = {
+			...makeWorkspaceProvider(undefined),
+			id: "replacement-provider",
+		};
+		let provider = firstProvider;
+		const bracket = new WorkspaceBracket(() => provider);
+		await bracket.prepare(ctx);
+
+		// Provider registration may change while a run owns the workspace; its
+		// opaque checkpoint must still remain attributable to its creator.
+		provider = replacementProvider;
+		bracket.suspend(outcome);
+
+		expect(bracket.snapshot()).toEqual({
+			providerId: "first-provider",
+			state: { cwd: "/ws/dir" },
+		});
+	});
 });
 
 describe("WorkspaceBracket — dispose", () => {
@@ -97,7 +210,7 @@ describe("WorkspaceBracket — dispose", () => {
 
 	it("propagates a throwing dispose (does not swallow)", async () => {
 		const workspace: Workspace = {
-			cwd: "/ws/dir",
+			...makeWorkspace("/ws/dir"),
 			dispose: vi.fn(() => { throw new Error("dispose failed"); }),
 		};
 		const bracket = new WorkspaceBracket(() => makeWorkspaceProvider(workspace));
@@ -140,7 +253,7 @@ describe("WorkspaceBracket — wasDisposed", () => {
 
 	it("is true even when the workspace's dispose threw", async () => {
 		const workspace: Workspace = {
-			cwd: "/ws/dir",
+			...makeWorkspace("/ws/dir"),
 			dispose: vi.fn(() => { throw new Error("dispose failed"); }),
 		};
 		const bracket = new WorkspaceBracket(() => makeWorkspaceProvider(workspace));

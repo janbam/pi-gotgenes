@@ -38,7 +38,11 @@ export interface AgentToolManager {
 export interface AgentToolRuntime {
 	buildSnapshot(inheritContext: boolean): ParentSnapshot;
 	getModelInfo(): ModelInfo;
-	getSessionInfo(): { parentSessionFile: string; parentSessionId: string };
+  getSessionInfo(): {
+    parentSessionFile: string;
+    parentSessionId: string;
+    parentEntryId: string | null;
+  };
 }
 
 /** Narrow settings accessor — only the fields the Agent tool reads. */
@@ -89,8 +93,14 @@ export class AgentTool {
 
 		// ---- Boundary extraction (after config so inheritContext is resolved) ----
 		const snapshot = this.runtime.buildSnapshot(config.execution.inheritContext);
-		const { parentSessionFile, parentSessionId } = this.runtime.getSessionInfo();
-		const parentSession: ParentSessionInfo = { parentSessionFile, parentSessionId, toolCallId };
+    const { parentSessionFile, parentSessionId, parentEntryId } =
+      this.runtime.getSessionInfo();
+    const parentSession: ParentSessionInfo = {
+      parentSessionFile,
+      parentSessionId,
+      parentEntryId,
+      toolCallId,
+    };
 
 		// ---- Resume existing agent ----
 		if (params.resume) {
@@ -282,10 +292,22 @@ ${guidelines}
  * Exhaustive over `ResumeRefusalReason`, so a reason added later fails to
  * compile here rather than falling through to an attempted resume.
  */
+// The branch count is the point: every refusal owns distinct actionable wording.
+// fallow-ignore-next-line complexity
 function resumeRefusalMessage(refusal: ResumeRefusalReason, id: string): string {
 	switch (refusal) {
+		case "deleted":
+			return (
+				`Agent "${id}" was explicitly deleted from this parent-session lineage. ` +
+				"Its durable conversation handle cannot be resumed."
+			);
 		case "unknown-agent":
-			return `Agent not found: "${id}". Records are cleared at session start/switch, so it may be from a previous session.`;
+			return `Agent not found: "${id}". No subagent with this ID belongs to the active parent-session lineage.`;
+		case "parent-transition":
+			return (
+				`Agent "${id}" cannot resume while its parent session or lineage is changing. ` +
+				"Retry with the same ID after the transition settles."
+			);
 		case "still-running":
 			return (
 				`Agent "${id}" is still running; wait for it to finish before resuming. ` +
@@ -301,6 +323,17 @@ function resumeRefusalMessage(refusal: ResumeRefusalReason, id: string): string 
 				"exists; resume is unavailable because the agent would re-enter a directory that " +
 				"has been removed. Spawn a new agent instead — the agent's result records where " +
 				"any work was saved."
+			);
+		case "unavailable":
+			return (
+				`Agent "${id}" cannot be resumed because its persisted transcript or ` +
+				"workspace is unavailable. Restore the missing artifact, then retry with the same ID."
+			);
+		case "incompatible":
+			return (
+				`Agent "${id}" cannot be resumed because its persisted session is ` +
+				"incompatible with the current Pi runtime, model, or workspace provider. " +
+				"Restore the required runtime configuration, then retry with the same ID."
 			);
 	}
 }

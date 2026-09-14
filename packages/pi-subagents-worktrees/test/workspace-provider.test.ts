@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -70,8 +71,87 @@ describe("WorktreeWorkspaceProvider", () => {
     expect(workspace?.cwd).toBeDefined();
     expect(workspace?.cwd).not.toBe(repoDir);
     expect(existsSync(workspace!.cwd)).toBe(true);
+    expect(workspace!.snapshot()).toMatchObject({
+      version: 1,
+      repoCwd: repoDir,
+      path: workspace!.cwd,
+      branch: "pi-agent-agent-1",
+    });
     // Clean up the worktree created by this test.
     workspace?.dispose({ status: "completed", description: "test" });
+  });
+
+  it("exposes a stable provider identity", () => {
+    expect(makeProvider().id).toBe("@gotgenes/pi-subagents-worktrees");
+  });
+
+  it("suspends and restores a clean worktree at the same path", async () => {
+    const provider = makeProvider();
+    const context = ctx({ agentType: "Explore", baseCwd: repoDir });
+    const workspace = await provider.prepare(context);
+    const originalPath = workspace!.cwd;
+
+    const suspended = workspace!.suspend({
+      status: "completed",
+      description: "checkpoint clean work",
+    });
+    expect(existsSync(originalPath)).toBe(false);
+
+    const restored = await provider.restore(context, suspended.state);
+    expect(restored.cwd).toBe(originalPath);
+    expect(existsSync(originalPath)).toBe(true);
+    restored.dispose({ status: "completed", description: "done" });
+  });
+
+  it("suspends dirty work and restores its exact content", async () => {
+    const provider = makeProvider();
+    const context = ctx({
+      agentType: "Explore",
+      baseCwd: repoDir,
+      agentId: "resume-dirty",
+    });
+    const workspace = await provider.prepare(context);
+    const originalPath = workspace!.cwd;
+    writeFileSync(join(originalPath, "resumable.txt"), "child checkpoint");
+
+    const suspended = workspace!.suspend({
+      status: "completed",
+      description: "checkpoint dirty work",
+    });
+    const restored = await provider.restore(context, suspended.state);
+
+    expect(restored.cwd).toBe(originalPath);
+    expect(readFileSync(join(originalPath, "resumable.txt"), "utf8")).toBe(
+      "child checkpoint",
+    );
+    restored.dispose({ status: "completed", description: "done" });
+  });
+
+  it("rejects malformed persisted JSON as incompatible", async () => {
+    const provider = makeProvider();
+
+    await expect(
+      provider.restore(ctx({ agentType: "Explore", baseCwd: repoDir }), {
+        version: 1,
+        path: "/tmp/not-enough",
+      }),
+    ).rejects.toMatchObject({ reason: "incompatible" });
+  });
+
+  it("rejects a checkpoint path outside the provider's temporary namespace", async () => {
+    const provider = makeProvider();
+    const workspace = await provider.prepare(
+      ctx({ agentType: "Explore", baseCwd: repoDir }),
+    );
+    const state = workspace!.snapshot() as Record<string, unknown>;
+    workspace!.dispose({ status: "completed", description: "done" });
+
+    await expect(
+      provider.restore(ctx({ agentType: "Explore", baseCwd: repoDir }), {
+        ...state,
+        path: join(repoDir, "must-not-be-created"),
+      }),
+    ).rejects.toMatchObject({ reason: "incompatible" });
   });
 
   it("throws for an opted-in agent when the base dir is not a git repo", async () => {

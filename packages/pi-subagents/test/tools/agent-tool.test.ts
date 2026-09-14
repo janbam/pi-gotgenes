@@ -102,8 +102,42 @@ describe("AgentTool — resume path", () => {
 				resume: "nonexistent",
 			});
 			expect(result.content[0].text).toBe(
-				'Agent not found: "nonexistent". Records are cleared at session start/switch, so it ' +
-					"may be from a previous session.",
+				'Agent not found: "nonexistent". No subagent with this ID belongs to the active ' +
+					"parent-session lineage.",
+			);
+		});
+
+		it("distinguishes an explicitly deleted durable handle", async () => {
+			const deps = createToolDeps();
+			mockResumeRefusal(deps, "deleted");
+
+			const result = await execute(deps, {
+				prompt: "continue",
+				description: "resume",
+				subagent_type: "general-purpose",
+				resume: "deleted-agent",
+			});
+
+			expect(result.content[0].text).toBe(
+				'Agent "deleted-agent" was explicitly deleted from this parent-session lineage. ' +
+					"Its durable conversation handle cannot be resumed.",
+			);
+		});
+
+		it("tells the parent to retry after its session transition settles", async () => {
+			const deps = createToolDeps();
+			mockResumeRefusal(deps, "parent-transition");
+
+			const result = await execute(deps, {
+				prompt: "continue",
+				description: "resume",
+				subagent_type: "general-purpose",
+				resume: "agent-1",
+			});
+
+			expect(result.content[0].text).toBe(
+				'Agent "agent-1" cannot resume while its parent session or lineage is changing. ' +
+					"Retry with the same ID after the transition settles.",
 			);
 		});
 
