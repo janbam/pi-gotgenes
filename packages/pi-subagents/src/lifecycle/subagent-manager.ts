@@ -387,6 +387,7 @@ export class SubagentManager {
   }
 
   /** Persist and release the outgoing parent view without deleting durable records. */
+  // fallow-ignore-next-line unused-class-member -- LifecycleHandlers invokes this public boundary through its manager dependency.
   async deactivate(): Promise<void> {
     if (!this.activeSession) return;
 
@@ -668,7 +669,6 @@ export class SubagentManager {
   }
 
   /** Wait for all running and queued agents to complete (including queued ones). */
-  // fallow-ignore-next-line unused-class-member
   async waitForAll(): Promise<void> {
     // Every spawned agent has a settled-on-completion promise (the limiter starts
     // queued ones as slots free), so a single allSettled covers the queued case.
