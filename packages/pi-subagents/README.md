@@ -216,6 +216,8 @@ Resuming lazily reopens those resources.
 Durable records live for the parent-session lineage rather than a wall-clock TTL.
 Parent compaction and session navigation do not delete them; deleting the parent session ends their lifetime.
 An explicit record deletion leaves a branch-scoped tombstone so a later resume returns `deleted` instead of degrading to `unknown-agent`.
+During `/tree`, children leaving the selected ancestry settle before navigation when possible.
+The manager rejects reentrant spawn/resume calls during that settlement, then silently settles any old-branch work admitted before the leaf actually changes so its lifecycle events, history entries, results, and notifications cannot leak into the selected sibling.
 
 The shutdown event is dispatched and awaited **before** the child's `AgentSession` is disposed, so a handler still has a live context and can close what it opened — stdio subprocesses, sockets, timers, file handles.
 Each child's shutdown is bounded: a handler that never resolves is abandoned after a few seconds and disposal proceeds, so one misbehaving extension cannot stall the parent's teardown or Pi's exit.
@@ -353,6 +355,7 @@ A resume that could not start resolves to `{ kind: "refused", reason }` instead 
 | -------------------- | ------------------------------------------------------------------------ |
 | `unknown-agent`      | No record or tombstone with that ID belongs to the active parent lineage |
 | `deleted`            | That lineage explicitly deleted the durable handle                       |
+| `parent-transition`  | Tree preparation is settling old-lineage work; retry after it finishes   |
 | `still-running`      | The agent has not settled; wait, or `steer` it while it runs             |
 | `no-session`         | The agent never had a session to continue                                |
 | `session-released`   | Its live session was released without a persisted transcript             |

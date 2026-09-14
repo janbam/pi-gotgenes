@@ -124,6 +124,23 @@ describe("AgentTool — resume path", () => {
 			);
 		});
 
+		it("tells the parent to retry after tree navigation settles", async () => {
+			const deps = createToolDeps();
+			mockResumeRefusal(deps, "parent-transition");
+
+			const result = await execute(deps, {
+				prompt: "continue",
+				description: "resume",
+				subagent_type: "general-purpose",
+				resume: "agent-1",
+			});
+
+			expect(result.content[0].text).toBe(
+				'Agent "agent-1" cannot resume while the parent is navigating its session tree. ' +
+					"Retry with the same ID after navigation settles.",
+			);
+		});
+
 		it("names a missing session without offering a cleanup story it cannot tell", async () => {
 			const deps = createToolDeps();
 			mockResumeRefusal(deps, "no-session");

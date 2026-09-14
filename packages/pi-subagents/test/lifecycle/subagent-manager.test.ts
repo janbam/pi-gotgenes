@@ -15,7 +15,9 @@ import type {
 import type { SubagentSession } from "#src/lifecycle/subagent-session";
 import type { WorkspaceProvider } from "#src/lifecycle/workspace";
 import { NotificationManager } from "#src/observation/notification";
+import { SubagentEventsObserver } from "#src/observation/subagent-events-observer";
 import type { RunConfig } from "#src/runtime";
+import { SubagentsServiceAdapter } from "#src/service/service-adapter";
 import type { AgentConfig, SessionContext, Subagent } from "#src/types";
 import { makeWorkspace, makeWorkspaceProvider } from "#test/helpers/make-workspace";
 import { createBlockingFactory, createSessionFactory } from "#test/helpers/manager-stubs";
@@ -487,6 +489,341 @@ describe("SubagentManager", () => {
 
       expect(deactivated).toBe(true);
       expect(manager.listAgents()).toEqual([]);
+    });
+
+    it("settles only departing sibling agents before reprojecting a tree branch", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const rootGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const siblingGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const rootSession = createSubagentSessionStub();
+      const siblingSession = createSubagentSessionStub();
+      rootSession.runTurnLoop.mockImplementation(async () => {
+        await rootGate.promise;
+        return { responseText: "shared done", aborted: false, steered: false };
+      });
+      siblingSession.runTurnLoop.mockImplementation(async () => {
+        await siblingGate.promise;
+        return { responseText: "sibling stopped", aborted: false, steered: false };
+      });
+      const sessions = [rootSession, siblingSession];
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      const sideEffects = new SubagentEventsObserver({
+        emit: vi.fn(),
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      const manager = createManager({
+        createSubagentSession: vi.fn(async () =>
+          toSubagentSession(sessions.shift() ?? createSubagentSessionStub()),
+        ),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+      const sharedId = manager.spawn(STUB_SNAPSHOT, "Explore", "shared", {
+        description: "shared agent",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "shared-entry" },
+      });
+      const siblingId = manager.spawn(STUB_SNAPSHOT, "Explore", "sibling", {
+        description: "old sibling agent",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "old-entry" },
+      });
+      await vi.waitFor(() => {
+        expect(rootSession.runTurnLoop).toHaveBeenCalledOnce();
+        expect(siblingSession.runTurnLoop).toHaveBeenCalledOnce();
+      });
+      const sharedRecord = manager.getRecord(sharedId);
+
+      // Finish the departing child while the old leaf still owns all branch-local effects.
+      const preparing = manager.prepareTreeTransition("shared-entry");
+      siblingGate.resolve();
+      await preparing;
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await manager.reconcileTree(parent.ctx);
+
+      expect(manager.getRecord(siblingId)).toBeUndefined();
+      expect(manager.getRecord(sharedId)).toBe(sharedRecord);
+      expect(manager.getRecord(sharedId)?.status).toBe("running");
+      expect(JSON.stringify(parent.read())).toContain(siblingId);
+
+      // A shared-ancestor child remains live and may complete on the selected branch.
+      rootGate.resolve();
+      await sharedRecord?.promise;
+      expect(appendedAt).toEqual(["old-entry", "new-entry"]);
+      expect(notifiedAt).toEqual(["old-entry", "new-entry"]);
+    });
+
+    it("waits for an already-aborted departing run before releasing its branch", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const runGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const session = createSubagentSessionStub();
+      const workspace = makeWorkspace("/worktrees/departing");
+      session.runTurnLoop.mockImplementation(async () => {
+        await runGate.promise;
+        return { responseText: "stopped", aborted: false, steered: false };
+      });
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      const sideEffects = new SubagentEventsObserver({
+        emit: vi.fn(),
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      const manager = createManager({
+        createSubagentSession: vi.fn(async () => toSubagentSession(session)),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.registerWorkspaceProvider(makeWorkspaceProvider(workspace));
+      manager.activate(parent.ctx);
+      const id = manager.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "already stopped sibling",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "old-entry" },
+      });
+      await vi.waitFor(() => {
+        expect(session.runTurnLoop).toHaveBeenCalledOnce();
+      });
+
+      // A synchronous stopped status does not mean the run's terminal observer
+      // and resource teardown have settled.
+      expect(manager.abort(id)).toBe(true);
+      let prepared = false;
+      const preparing = manager.prepareTreeTransition("shared-entry").then(() => {
+        prepared = true;
+      });
+      await Promise.resolve();
+      expect(prepared).toBe(false);
+      expect(session.dispose).not.toHaveBeenCalled();
+
+      runGate.resolve();
+      await preparing;
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+      expect(workspace.suspend).toHaveBeenCalledOnce();
+      expect(session.dispose).toHaveBeenCalledOnce();
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await manager.reconcileTree(parent.ctx);
+      expect(manager.getRecord(id)).toBeUndefined();
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+    });
+
+    it("rejects reentrant service spawns during tree preparation", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const siblingGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const siblingSession = createSubagentSessionStub();
+      siblingSession.runTurnLoop.mockImplementation(async () => {
+        await siblingGate.promise;
+        return { responseText: "sibling stopped", aborted: false, steered: false };
+      });
+      const workspace = makeWorkspace("/worktrees/sibling");
+      const eventsAt: Array<{ channel: string; leaf: string | undefined }> = [];
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      let reentrantError: unknown;
+      let reentrantResume: ReturnType<SubagentsServiceAdapter["resume"]> | undefined;
+      const serviceRef: { current?: SubagentsServiceAdapter } = {};
+      const sideEffects = new SubagentEventsObserver({
+        emit: (channel) => {
+          eventsAt.push({ channel, leaf: branchIds.at(-1) });
+          if (channel !== "subagents:failed") return;
+          const service = serviceRef.current;
+          if (!service) throw new Error("service fixture was not initialized");
+          try {
+            service.spawn("Explore", "spawned by completion subscriber");
+          } catch (error) {
+            reentrantError = error;
+          }
+          reentrantResume = service.resume(siblingId, "resume from completion subscriber");
+        },
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      const manager = createManager({
+        createSubagentSession: vi.fn(async () => toSubagentSession(siblingSession)),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.registerWorkspaceProvider(makeWorkspaceProvider(workspace));
+      manager.activate(parent.ctx);
+      serviceRef.current = new SubagentsServiceAdapter(
+        manager,
+        vi.fn(),
+        {
+          currentCtx: parent.ctx,
+          buildSnapshot: () => STUB_SNAPSHOT,
+          getSessionInfo: () => ({
+            parentSessionFile: "/sessions/parent.jsonl",
+            parentSessionId: "parent-session",
+            parentEntryId: branchIds.at(-1) ?? null,
+          }),
+        },
+      );
+      const siblingId = manager.spawn(STUB_SNAPSHOT, "Explore", "sibling", {
+        description: "old sibling agent",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "old-entry" },
+      });
+      await vi.waitFor(() => {
+        expect(siblingSession.runTurnLoop).toHaveBeenCalledOnce();
+      });
+
+      // The completion event is a synchronous cross-extension reentrancy point;
+      // it must not admit fresh old-leaf work after the departing snapshot.
+      const preparing = manager.prepareTreeTransition("shared-entry");
+      siblingGate.resolve();
+      await preparing;
+      expect(reentrantError).toEqual(
+        new Error("Cannot spawn a subagent while parent tree navigation is in progress"),
+      );
+      await expect(reentrantResume).resolves.toEqual({
+        kind: "refused",
+        reason: "parent-transition",
+      });
+      expect(manager.listAgents().map((record) => record.id)).toEqual([siblingId]);
+      expect(siblingSession.dispose).toHaveBeenCalledOnce();
+      expect(workspace.suspend).toHaveBeenCalledOnce();
+      expect(eventsAt).toEqual([
+        { channel: "subagents:failed", leaf: "old-entry" },
+      ]);
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      await manager.reconcileTree(parent.ctx);
+      expect(manager.getRecord(siblingId)).toBeUndefined();
+      expect(JSON.stringify(parent.read())).toContain(siblingId);
+      expect(eventsAt).toEqual([
+        { channel: "subagents:failed", leaf: "old-entry" },
+      ]);
+      expect(appendedAt).toEqual(["old-entry"]);
+      expect(notifiedAt).toEqual(["old-entry"]);
+    });
+
+    it("silently settles old-lineage work admitted after tree preparation", async () => {
+      const branchIds = ["shared-entry", "old-entry"];
+      const parent = parentState(undefined, branchIds);
+      const lateGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+      const lateSession = createSubagentSessionStub();
+      const workspace = makeWorkspace("/worktrees/late-sibling");
+      lateSession.runTurnLoop.mockImplementation(async () => {
+        await lateGate.promise;
+        return { responseText: "late sibling stopped", aborted: false, steered: false };
+      });
+      const eventsAt: Array<{ channel: string; leaf: string | undefined }> = [];
+      const appendedAt: Array<string | undefined> = [];
+      const notifiedAt: Array<string | undefined> = [];
+      const sideEffects = new SubagentEventsObserver({
+        emit: (channel) => { eventsAt.push({ channel, leaf: branchIds.at(-1) }); },
+        appendEntry: vi.fn(() => { appendedAt.push(branchIds.at(-1)); }),
+        notifications: {
+          sendCompletion: vi.fn(() => { notifiedAt.push(branchIds.at(-1)); }),
+          sendUpdate: vi.fn(),
+          sendWorkspaceNotice: vi.fn(),
+          dispose: vi.fn(),
+        },
+      });
+      const manager = createManager({
+        createSubagentSession: vi.fn(async () => toSubagentSession(lateSession)),
+        observer: {
+          onSubagentCompleted: (record) =>
+            sideEffects.onSubagentCompleted(record),
+        },
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.registerWorkspaceProvider(makeWorkspaceProvider(workspace));
+      manager.activate(parent.ctx);
+      const service = new SubagentsServiceAdapter(
+        manager,
+        vi.fn(),
+        {
+          currentCtx: parent.ctx,
+          buildSnapshot: () => STUB_SNAPSHOT,
+          getSessionInfo: () => ({
+            parentSessionFile: "/sessions/parent.jsonl",
+            parentSessionId: "parent-session",
+            parentEntryId: branchIds.at(-1) ?? null,
+          }),
+        },
+      );
+
+      // Admission reopens after preparation because another extension can
+      // cancel navigation without emitting a matching completion event.
+      await manager.prepareTreeTransition("shared-entry");
+      const lateId = service.spawn("Explore", "admitted before tree commit");
+      await vi.waitFor(() => {
+        expect(lateSession.runTurnLoop).toHaveBeenCalledOnce();
+      });
+
+      branchIds.splice(0, branchIds.length, "shared-entry", "new-entry");
+      let reconciled = false;
+      const reconciling = manager.reconcileTree(parent.ctx).then(() => {
+        reconciled = true;
+      });
+      await Promise.resolve();
+      expect(reconciled).toBe(false);
+
+      lateGate.resolve();
+      await reconciling;
+      expect(manager.getRecord(lateId)).toBeUndefined();
+      expect(JSON.stringify(parent.read())).toContain(lateId);
+      expect(JSON.stringify(parent.read())).toContain('"status":"stopped"');
+      expect(lateSession.dispose).toHaveBeenCalledOnce();
+      expect(workspace.suspend).toHaveBeenCalledOnce();
+      expect(eventsAt).toEqual([]);
+      expect(appendedAt).toEqual([]);
+      expect(notifiedAt).toEqual([]);
+    });
+
+    it("reopens admission as soon as tree preparation settles", async () => {
+      const parent = parentState(undefined, ["shared-entry", "old-entry"]);
+      const manager = createManager({
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(manager);
+      manager.activate(parent.ctx);
+
+      await manager.prepareTreeTransition("shared-entry");
+      expect(() => spawnBg(manager)).not.toThrow();
     });
   });
 

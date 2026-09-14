@@ -33,6 +33,12 @@ On activation, an anchored record is visible only when that entry appears in the
 Records and tombstones from sibling branches remain hidden but are preserved on every write.
 Forked or cloned parent sessions inherit Pi's effective registry snapshot, while unrelated sessions begin without one.
 
+Tree navigation settles children anchored after the common ancestor while the old leaf still owns their terminal effects.
+Spawn and resume admission closes during that drain because a lifecycle subscriber can synchronously re-enter the public service.
+Pi emits no completion event when a later extension cancels navigation, so admission reopens when preparation settles rather than waiting for `session_tree`.
+After a successful leaf change, reconciliation silently settles any old-lineage child admitted in the intervening window, releases its live resources, and preserves its final record as a hidden sibling.
+Shared-ancestor children retain their live object and continue without interruption.
+
 ### Child sessions reopen exactly and lazily
 
 Resume first reconstructs any workspace and then opens the persisted child JSONL with `SessionManager.open()`.
@@ -61,6 +67,7 @@ If a crash left the registered checkout live, restoration reuses it verbatim so 
 
 - Parent compaction, continuation, reopening, and session switching preserve same-ID resume within the active ancestry.
 - A sibling branch or unrelated parent cannot inspect, steer, delete, or resume another lineage's records.
+- A transient `parent-transition` refusal keeps a reentrant resume retryable under the same ID, while branch reconciliation prevents lifecycle events, history entries, results, and notifications from crossing into a selected sibling.
 - Durable registry size is bounded by the parent-session artifact's lifetime rather than an arbitrary expiry clock.
 - Missing repositories, revisions, transcripts, or providers remain visible as stable fail-closed refusals.
 - The provider contract is intentionally breaking because the old prepare/dispose bracket could not represent a resumable terminal state.

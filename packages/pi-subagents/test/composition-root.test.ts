@@ -151,6 +151,7 @@ describe("composition root: parent lineage lifecycle", () => {
 
     subagentsExtension(pi);
 
+    expect(handlers.get("session_before_tree")).toHaveLength(1);
     expect(handlers.get("session_tree")).toHaveLength(1);
   });
 });

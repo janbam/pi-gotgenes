@@ -301,6 +301,11 @@ function resumeRefusalMessage(refusal: ResumeRefusalReason, id: string): string 
 			);
 		case "unknown-agent":
 			return `Agent not found: "${id}". No subagent with this ID belongs to the active parent-session lineage.`;
+		case "parent-transition":
+			return (
+				`Agent "${id}" cannot resume while the parent is navigating its session tree. ` +
+				"Retry with the same ID after navigation settles."
+			);
 		case "still-running":
 			return (
 				`Agent "${id}" is still running; wait for it to finish before resuming. ` +

@@ -358,7 +358,7 @@ src/
 │   └── session-dir.ts              session directory derivation
 │
 ├── lifecycle/                      agent execution and state tracking
-│   ├── subagent-manager.ts         active parent-lineage cache + observer wiring + memory-retention sweep; activates durable records, preserves sibling-branch records, and lazily restores at the resume choke point
+│   ├── subagent-manager.ts         active parent-lineage cache + observer wiring + memory-retention sweep; activates durable records, settles and silences records leaving a `/tree` ancestry, preserves sibling-branch records, and lazily restores at the resume choke point
 │   ├── subagent-persistence.ts     versioned session-global registry: durable child metadata, branch-ancestry filtering, hidden sibling preservation, and deletion tombstones
 │   ├── create-subagent-session.ts  shared child activation pipeline over fresh allocation or exact persisted SessionManager reopening
 │   ├── subagent-session.ts         born-complete child session: turn loop, steer, shutdown-then-dispose teardown

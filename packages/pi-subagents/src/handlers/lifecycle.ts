@@ -11,6 +11,8 @@ import type { SessionContext } from "#src/types";
 export interface LifecycleManager {
   activate(ctx: SessionContext): void;
   deactivate(): Promise<void>;
+  prepareTreeTransition(commonAncestorId: string | null): Promise<void>;
+  reconcileTree(ctx: SessionContext): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -47,15 +49,24 @@ export class SessionLifecycleHandler {
     return this.manager.deactivate();
   }
 
-  /** Replace the activated registry after `/tree` selects a new ancestry. */
-  async handleSessionTree(_event: unknown, ctx: unknown): Promise<void> {
+  /** Settle records leaving the target ancestry while the old leaf still owns side effects. */
+  handleSessionBeforeTree(event: unknown): Promise<void> {
+    const treeEvent = event as {
+      preparation: { commonAncestorId: string | null };
+    };
+    return this.manager.prepareTreeTransition(
+      treeEvent.preparation.commonAncestorId,
+    );
+  }
+
+  /** Reproject the durable registry after `/tree` selects a new ancestry. */
+  handleSessionTree(_event: unknown, ctx: unknown): Promise<void> {
     const sessionContext = ctx as SessionContext;
 
-    // The leaf has already changed, but the cache still represents the old
-    // ancestry. Persist and settle it before exposing the selected branch.
-    await this.manager.deactivate();
+    // Shared-ancestor records retain their live objects; only branch visibility
+    // changes after the pre-navigation settlement boundary.
     this.runtime.setSessionContext(sessionContext);
-    this.manager.activate(sessionContext);
+    return this.manager.reconcileTree(sessionContext);
   }
 
   // Cleanup order matters:
