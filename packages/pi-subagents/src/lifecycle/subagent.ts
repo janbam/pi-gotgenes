@@ -527,6 +527,9 @@ export class Subagent {
 	}
 
 	/** Lazily reopen a released child before the manager starts its resumed turn. */
+	// Restoration is one policy funnel: splitting its refusal and cleanup branches
+	// would hide the invariant that every acquired resource leaves through here.
+	// fallow-ignore-next-line complexity
 	async prepareResume(): Promise<ResumeRefusal | undefined> {
 		const currentRefusal = this.resumeRefusal;
 		if (

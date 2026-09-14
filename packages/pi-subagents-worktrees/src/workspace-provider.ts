@@ -184,6 +184,8 @@ export class WorktreeWorkspaceProvider implements WorkspaceProvider {
 }
 
 /** Decode only this provider's current checkpoint schema. */
+// Decode shape, namespace, and revision atomically so no partial token is usable.
+// fallow-ignore-next-line complexity
 function decodeState(
   state: WorkspaceState,
 ): WorktreeWorkspaceState | undefined {

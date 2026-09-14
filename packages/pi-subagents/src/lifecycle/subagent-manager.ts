@@ -455,6 +455,9 @@ export class SubagentManager {
   }
 
   /** Reproject visible records after Pi commits a `/tree` leaf change. */
+  // Keep projection, departing-resource settlement, and hidden-state preservation
+  // in one ordered transaction; splitting phases would weaken that sequence.
+  // fallow-ignore-next-line complexity
   async reconcileTree(ctx: SessionContext): Promise<void> {
     if (!this.activeSession) {
       this.activate(ctx);
@@ -800,6 +803,8 @@ export class SubagentManager {
    * refusal, so retrying the same ID after preparation remains valid. Delegates
    * to Subagent.resume(), which owns the observer subscription lifecycle.
    */
+  // This is the single public refusal funnel; its branches are the API contract.
+  // fallow-ignore-next-line complexity
   async resume(id: string, prompt: string, options: ResumeCallOptions = {}): Promise<ResumeOutcome> {
     if (this.parentTransitioning) {
       return { kind: "refused", reason: "parent-transition" };

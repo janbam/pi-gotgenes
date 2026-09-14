@@ -56,8 +56,9 @@ interface RunUpdate {
 	announced: boolean;
 }
 
-export interface SubagentStateInit {
-	status?: SubagentStatus;
+/** Serializable state retained by the parent registry between Pi processes. */
+export interface SubagentStateSnapshot {
+	status: SubagentStatus;
 	result?: string;
 	/** The question the agent ended its turn with — an outcome fact, like result. */
 	pendingQuestion?: string;
@@ -66,36 +67,21 @@ export interface SubagentStateInit {
 	error?: string;
 	/** Whether the agent was stopped before the limiter ever admitted it. */
 	stoppedWhileQueued?: boolean;
-	startedAt?: number;
-	completedAt?: number;
-	/** Time the parent collected the outcome; undefined = obligation still open. */
-	consumedAt?: number;
-	// Stats — seed a populated value without replaying the accumulation methods
-	toolUses?: number;
-	lifetimeUsage?: LifetimeUsage;
-	compactionCount?: number;
-	// Live activity — activeTools is seeded by name (each entry calls addActiveTool)
-	turnCount?: number;
-	activeTools?: string[];
-	responseText?: string;
-}
-
-/** Serializable state retained by the parent registry between Pi processes. */
-export interface SubagentStateSnapshot {
-	status: SubagentStatus;
-	result?: string;
-	pendingQuestion?: string;
-	workspaceNotice?: string;
-	error?: string;
-	stoppedWhileQueued?: boolean;
 	startedAt: number;
 	completedAt?: number;
+	/** Time the parent collected the outcome; undefined = obligation still open. */
 	consumedAt?: number;
 	toolUses: number;
 	lifetimeUsage: LifetimeUsage;
 	compactionCount: number;
 	turnCount: number;
 	responseText: string;
+}
+
+/** Optional seeds accepted when constructing fresh or restored state. */
+export interface SubagentStateInit extends Partial<SubagentStateSnapshot> {
+	/** Live tool names restored through mutation so their generated IDs remain process-local. */
+	activeTools?: string[];
 }
 
 export class SubagentState {

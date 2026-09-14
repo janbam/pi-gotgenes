@@ -75,13 +75,13 @@ function createManager(overrides?: {
   const createSubagentSession: SessionFactory = overrides?.createSubagentSession ?? defaultFactory();
   const observer: SubagentManagerObserver | undefined = overrides?.observer
     ? {
-        onSubagentStarted: overrides.observer.onSubagentStarted ?? (() => {}),
-        onSubagentCompleted: overrides.observer.onSubagentCompleted ?? (() => {}),
-        onSubagentResumed: overrides.observer.onSubagentResumed ?? (() => {}),
-        onSubagentResuming: overrides.observer.onSubagentResuming ?? (() => {}),
-        onSubagentCompacted: overrides.observer.onSubagentCompacted ?? (() => {}),
-        onSubagentCreated: overrides.observer.onSubagentCreated ?? (() => {}),
-        onSubagentWorkspaceNotice: overrides.observer.onSubagentWorkspaceNotice,
+        onSubagentStarted: () => {},
+        onSubagentCompleted: () => {},
+        onSubagentResumed: () => {},
+        onSubagentResuming: () => {},
+        onSubagentCompacted: () => {},
+        onSubagentCreated: () => {},
+        ...overrides.observer,
       }
     : undefined;
   const limiter = new ConcurrencyLimiter(overrides?.getMaxConcurrent ?? (() => DEFAULT_MAX_CONCURRENT));

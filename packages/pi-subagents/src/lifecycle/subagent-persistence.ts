@@ -210,6 +210,8 @@ function isPersistedTombstone(
 }
 
 /** True when a decoded JSON value is one complete current-version record. */
+// Enumerate every durable field here so malformed state fails closed at one boundary.
+// fallow-ignore-next-line complexity
 function isPersistedRecord(value: unknown): value is PersistedSubagentRecord {
   if (!isObject(value)) return false;
   if (
@@ -233,6 +235,8 @@ function isPersistedRecord(value: unknown): value is PersistedSubagentRecord {
 }
 
 /** Validate the state fields read by hydration without accepting coercions. */
+// The conjunction mirrors the persisted schema; decomposition would obscure completeness.
+// fallow-ignore-next-line complexity
 function isPersistedState(value: unknown): value is PersistedSubagentState {
   if (!isObject(value) || !isSubagentStatus(value.status)) return false;
   return (
@@ -254,6 +258,8 @@ function isPersistedState(value: unknown): value is PersistedSubagentState {
 }
 
 /** Validate exact child activation values used by the reopen path. */
+// Every activation input is security- and compatibility-relevant; validate them together.
+// fallow-ignore-next-line complexity
 function isPersistedSession(value: unknown): value is PersistedSubagentSession {
   if (!isObject(value)) return false;
   return (
