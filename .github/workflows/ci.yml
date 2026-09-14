@@ -20,6 +20,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Prepare fork Pi dependencies
+        run: ./scripts/ci/prepare-pi-fork.sh
+
       - run: pnpm install --frozen-lockfile
 
       - name: Typecheck
