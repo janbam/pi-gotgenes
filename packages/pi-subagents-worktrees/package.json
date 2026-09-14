@@ -52,6 +52,7 @@
     ]
   },
   "scripts": {
+    "precheck": "pnpm --filter @gotgenes/pi-subagents run build:types",
     "check": "tsc --noEmit",
     "lint": "biome check . && eslint .",
     "test": "vitest run",
