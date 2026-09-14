@@ -38,11 +38,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: main
-          # The release commit is pushed to main, which the default GITHUB_TOKEN
-          # is not used for here — this is the same token the retired
-          # release-please job pushed its baseline commit with. The name is now
-          # historical; the secret is unchanged.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          # Prefer the historical PAT so the release push starts ordinary CI.
+          # Forks without that secret still release through this job's scoped
+          # contents:write token; downstream jobs verify the exact pushed SHA.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           # Full history and tags: git-cliff derives every version and changelog
           # from them, and a shallow clone would silently produce wrong versions.
           fetch-depth: 0
