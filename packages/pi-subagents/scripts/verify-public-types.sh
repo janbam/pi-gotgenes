@@ -24,7 +24,7 @@ if grep -q '#src' "$DTS"; then
   grep -n '#src' "$DTS" >&2
   exit 1
 fi
-for sym in getSubagentsService WorkspaceProvider SubagentsService LifetimeUsage Workspace WorkspacePrepareContext WorkspaceDisposeOutcome WorkspaceDisposeResult; do
+for sym in getSubagentsService WorkspaceProvider SubagentsService LifetimeUsage Workspace WorkspacePrepareContext WorkspaceDisposeOutcome WorkspaceDisposeResult WorkspaceSuspendResult; do
   grep -q "$sym" "$DTS" || { echo "FAIL: '$sym' missing from dist/public.d.ts" >&2; exit 1; }
 done
 echo "OK: dist/public.d.ts is self-contained and exports the public surface"
@@ -70,18 +70,31 @@ import {
   type WorkspaceDisposeResult,
   type WorkspacePrepareContext,
   type WorkspaceProvider,
+  type WorkspaceSuspendResult,
 } from "@gotgenes/pi-subagents";
+
+/** Minimal resumable workspace proving every public lifecycle type composes. */
+function workspaceFor(ctx: WorkspacePrepareContext): Workspace {
+  return {
+    cwd: ctx.baseCwd,
+    snapshot: () => ({ version: 1 }),
+    suspend(_outcome: WorkspaceDisposeOutcome): WorkspaceSuspendResult {
+      return { state: { version: 1 } };
+    },
+    dispose(_outcome: WorkspaceDisposeOutcome): WorkspaceDisposeResult | undefined {
+      return undefined;
+    },
+  };
+}
 
 // Exercise the value export and all workspace collaborator type exports.
 const provider: WorkspaceProvider = {
+  id: "consumer-workspace",
   async prepare(ctx: WorkspacePrepareContext): Promise<Workspace | undefined> {
-    const workspace: Workspace = {
-      cwd: ctx.baseCwd,
-      dispose(_outcome: WorkspaceDisposeOutcome): WorkspaceDisposeResult | undefined {
-        return undefined;
-      },
-    };
-    return workspace;
+    return workspaceFor(ctx);
+  },
+  async restore(ctx: WorkspacePrepareContext, _state): Promise<Workspace> {
+    return workspaceFor(ctx);
   },
 };
 
