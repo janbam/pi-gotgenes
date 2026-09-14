@@ -10,9 +10,10 @@
  * `renderSessionContext` mapping. Rendering lives here, not in the pure module,
  * because the components require a `TUI`, `cwd`, and markdown theme.
  *
- * The pane is strictly read-only — steering stays in the `steer_subagent` tool
- * and the widget. It consumes a `TranscriptSource`, so a released agent's disk
- * snapshot (`fileSnapshotSource`) swaps in without touching the renderer or the pane.
+ * The pane is read-only for transcript content — steering stays in the
+ * `steer_subagent` tool and the widget — but Ctrl+C can abort the viewed live
+ * agent. It consumes a `TranscriptSource`, so a released agent's disk snapshot
+ * (`fileSnapshotSource`) swaps in without touching the renderer or the pane.
  *
  * It mounts through `ui.custom`'s non-overlay path deliberately: Pi's regular-mode
  * renderer composites overlays into the buffer that backs scrollback, so an overlay
@@ -30,8 +31,15 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { AgentConfigLookup } from "#src/config/agent-types";
-import type { Theme } from "#src/ui/display";
-import { fileSnapshotSource, listNavigableAgents, liveSource, type NavigableSubagent, type TranscriptSource } from "#src/ui/session-navigation";
+import { getDisplayName, type Theme } from "#src/ui/display";
+import {
+  fileSnapshotSource,
+  isAbortableEntry,
+  listNavigableAgents,
+  liveSource,
+  type NavigableSubagent,
+  type TranscriptSource,
+} from "#src/ui/session-navigation";
 import { TranscriptContent } from "#src/ui/transcript-content";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +73,8 @@ export interface SessionNavigatorParams {
   cwd: string;
   /** Reads a persisted session file for the file-snapshot source. */
   readFile: (path: string) => string;
+  /** Abort action routed from Ctrl+C while viewing a live active child. */
+  abort: (id: string) => boolean;
 }
 
 /** Options for the read-only transcript pane. */
@@ -75,6 +85,8 @@ export interface TranscriptPaneOptions {
   done: (result: undefined) => void;
   cwd: string;
   markdownTheme: MarkdownTheme;
+  /** Present only while the selected live child can still be aborted. */
+  abort?: () => void;
 }
 
 /**
@@ -85,7 +97,7 @@ export interface TranscriptPaneOptions {
  * manager, so it stays a reactive consumer with no inbound call into the core.
  */
 export class SessionNavigatorHandler {
-  async handle({ ui, agents, registry, cwd, readFile }: SessionNavigatorParams): Promise<void> {
+  async handle({ ui, agents, registry, cwd, readFile, abort }: SessionNavigatorParams): Promise<void> {
     const entries = listNavigableAgents(agents, registry);
     if (entries.length === 0) {
       ui.notify("No subagent sessions to view.", "info");
@@ -107,9 +119,27 @@ export class SessionNavigatorHandler {
       return;
     }
     const markdownTheme = getMarkdownTheme();
+    const abortViewed = isAbortableEntry(entry) && entry.kind === "live"
+      ? () => {
+          const name = getDisplayName(entry.record.type, registry);
+          const level = abort(entry.record.id) ? "info" : "warning";
+          ui.notify(
+            level === "info" ? `Aborting ${name}.` : `${name} is no longer running.`,
+            level,
+          );
+        }
+      : undefined;
     await ui.custom<undefined>(
       (tui, theme, _keybindings, done) =>
-        new TranscriptPane({ tui, theme, source, done, cwd, markdownTheme }),
+        new TranscriptPane({
+          tui,
+          theme,
+          source,
+          done,
+          cwd,
+          markdownTheme,
+          abort: abortViewed,
+        }),
       { overlay: false },
     );
   }
@@ -132,13 +162,15 @@ export class TranscriptPane implements Component {
   private readonly theme: Theme;
   private readonly done: (result: undefined) => void;
   private readonly content: TranscriptContent;
+  private readonly abort?: () => void;
   /** Width the host last rendered at; input must use the same layout. */
   private renderedWidth: number | undefined;
 
-  constructor({ tui, theme, source, done, cwd, markdownTheme }: TranscriptPaneOptions) {
+  constructor({ tui, theme, source, done, cwd, markdownTheme, abort }: TranscriptPaneOptions) {
     this.tui = tui;
     this.theme = theme;
     this.done = done;
+    this.abort = abort;
     this.content = new TranscriptContent({ tui, cwd, markdownTheme, source });
     this.unsubscribe = source.subscribe((event) => {
       if (this.closed) return;
@@ -151,6 +183,11 @@ export class TranscriptPane implements Component {
     if (matchesKey(data, "escape") || matchesKey(data, "q")) {
       this.closed = true;
       this.done(undefined);
+      return;
+    }
+    if (matchesKey(data, "ctrl+c") && this.abort) {
+      this.abort();
+      this.tui.requestRender();
       return;
     }
 
@@ -200,7 +237,10 @@ export class TranscriptPane implements Component {
         ? "100%"
         : `${Math.round(((visibleStart + viewportHeight) / totalLines) * 100)}%`;
     const footerLeft = th.fg("dim", `${totalLines} lines · ${scrollPct}`);
-    const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn · Esc close");
+    const footerKeys = this.abort
+      ? "Ctrl+C abort · ↑↓ scroll · PgUp/PgDn · Esc close"
+      : "↑↓ scroll · PgUp/PgDn · Esc close";
+    const footerRight = th.fg("dim", footerKeys);
     const footerGap = Math.max(1, width - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(fit(footerLeft + " ".repeat(footerGap) + footerRight));
 

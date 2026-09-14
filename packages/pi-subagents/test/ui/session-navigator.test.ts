@@ -21,7 +21,12 @@ function ansiTheme() {
   };
 }
 
-function makePane(opts: { source?: TranscriptSource; done?: (r: undefined) => void; tui?: TUI } = {}) {
+function makePane(opts: {
+  source?: TranscriptSource;
+  done?: (r: undefined) => void;
+  tui?: TUI;
+  abort?: () => void;
+} = {}) {
   return new TranscriptPane({
     tui: opts.tui ?? mockTui(),
     theme: ansiTheme(),
@@ -29,6 +34,7 @@ function makePane(opts: { source?: TranscriptSource; done?: (r: undefined) => vo
     done: opts.done ?? vi.fn(),
     cwd: "/test/cwd",
     markdownTheme: getMarkdownTheme(),
+    abort: opts.abort,
   });
 }
 
@@ -57,6 +63,22 @@ describe("TranscriptPane", () => {
     const pane = makePane({ done });
     pane.handleInput("\x1b");
     expect(done).toHaveBeenCalledWith(undefined);
+  });
+
+  it("routes Ctrl+C to the injected abort action without closing", () => {
+    const abort = vi.fn();
+    const done = vi.fn();
+    const pane = makePane({ abort, done });
+
+    pane.handleInput("\x03");
+
+    expect(abort).toHaveBeenCalledOnce();
+    expect(done).not.toHaveBeenCalled();
+  });
+
+  it("shows the abort key only when the viewed entry is abortable", () => {
+    expect(makePane({ abort: vi.fn() }).render(80).join("\n")).toContain("Ctrl+C abort");
+    expect(makePane().render(80).join("\n")).not.toContain("Ctrl+C abort");
   });
 
   it("unsubscribes on dispose", () => {
@@ -202,15 +224,18 @@ describe("SessionNavigatorHandler", () => {
 
   // Invoke the component factory captured by the handler's ui.custom call and
   // render it — the act (handle) stays explicit in each test.
-  function renderCapturedPane(ui: ReturnType<typeof makeUI>, width = 80): string[] {
+  function capturedPane(ui: ReturnType<typeof makeUI>): Component {
     const factory = ui.custom.mock.calls[0][0] as (
       tui: TUI,
       theme: ReturnType<typeof ansiTheme>,
       kb: unknown,
       done: (r: undefined) => void,
     ) => Component;
-    const pane = factory(mockTui(), ansiTheme(), undefined, vi.fn());
-    return pane.render(width);
+    return factory(mockTui(), ansiTheme(), undefined, vi.fn());
+  }
+
+  function renderCapturedPane(ui: ReturnType<typeof makeUI>, width = 80): string[] {
+    return capturedPane(ui).render(width);
   }
 
   const noReadFile = (): string => {
@@ -220,14 +245,14 @@ describe("SessionNavigatorHandler", () => {
   it("notifies and skips the pane when no sessions are navigable", async () => {
     const ui = makeUI();
     const notReady = makeNavigable({ isSessionReady: () => false, outputFile: undefined });
-    await new SessionNavigatorHandler().handle({ ui, agents: [notReady], registry, cwd: "/test/cwd", readFile: noReadFile });
+    await new SessionNavigatorHandler().handle({ ui, agents: [notReady], registry, cwd: "/test/cwd", readFile: noReadFile, abort: vi.fn() });
     expect(ui.notify).toHaveBeenCalledWith("No subagent sessions to view.", "info");
     expect(ui.custom).not.toHaveBeenCalled();
   });
 
   it("does not open the pane when the operator cancels the picker", async () => {
     const ui = makeUI(undefined);
-    await new SessionNavigatorHandler().handle({ ui, agents: [makeNavigable()], registry, cwd: "/test/cwd", readFile: noReadFile });
+    await new SessionNavigatorHandler().handle({ ui, agents: [makeNavigable()], registry, cwd: "/test/cwd", readFile: noReadFile, abort: vi.fn() });
     expect(ui.select).toHaveBeenCalledOnce();
     expect(ui.custom).not.toHaveBeenCalled();
   });
@@ -243,7 +268,7 @@ describe("SessionNavigatorHandler", () => {
     })();
     const ui = makeUI(label);
 
-    await new SessionNavigatorHandler().handle({ ui, agents: [record], registry, cwd: "/test/cwd", readFile: noReadFile });
+    await new SessionNavigatorHandler().handle({ ui, agents: [record], registry, cwd: "/test/cwd", readFile: noReadFile, abort: vi.fn() });
 
     expect(ui.custom).toHaveBeenCalledOnce();
     // Invariant #423: the handler is a reactive consumer — it sources the
@@ -265,6 +290,7 @@ describe("SessionNavigatorHandler", () => {
       registry,
       cwd: "/test/cwd",
       readFile: noReadFile,
+      abort: vi.fn(),
     });
 
     expect(ui.custom).toHaveBeenCalledWith(expect.any(Function), { overlay: false });
@@ -284,7 +310,7 @@ describe("SessionNavigatorHandler", () => {
     });
     const ui = makeUI("Agent (Old task) · 5 tools · completed · 3.0s · session released (snapshot)");
 
-    await new SessionNavigatorHandler().handle({ ui, agents: [released], registry, cwd: "/test/cwd", readFile });
+    await new SessionNavigatorHandler().handle({ ui, agents: [released], registry, cwd: "/test/cwd", readFile, abort: vi.fn() });
 
     expect(readFile).toHaveBeenCalledWith("/tasks/e1.jsonl");
     expect(ui.custom).toHaveBeenCalledOnce();
@@ -301,9 +327,28 @@ describe("SessionNavigatorHandler", () => {
     });
     const ui = makeUI("Agent (Old task) · 5 tools · completed · 3.0s · session released (snapshot)");
 
-    await new SessionNavigatorHandler().handle({ ui, agents: [released], registry, cwd: "/test/cwd", readFile });
+    await new SessionNavigatorHandler().handle({ ui, agents: [released], registry, cwd: "/test/cwd", readFile, abort: vi.fn() });
 
     expect(ui.notify).toHaveBeenCalledWith("Could not read the session transcript file.", "error");
     expect(ui.custom).not.toHaveBeenCalled();
+  });
+
+  it("aborts the running agent from its transcript pane without closing it", async () => {
+    const record = makeNavigable({ id: "running-1", status: "running" });
+    const ui = makeUI("Agent (Test task) · 2 tools · running · 3.0s");
+    const abort = vi.fn(() => true);
+
+    await new SessionNavigatorHandler().handle({
+      ui,
+      agents: [record],
+      registry,
+      cwd: "/test/cwd",
+      readFile: noReadFile,
+      abort,
+    });
+    capturedPane(ui).handleInput?.("\x03");
+
+    expect(abort).toHaveBeenCalledWith("running-1");
+    expect(ui.notify).toHaveBeenCalledWith("Aborting Agent.", "info");
   });
 });
