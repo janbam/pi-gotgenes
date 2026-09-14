@@ -292,6 +292,8 @@ ${guidelines}
  * Exhaustive over `ResumeRefusalReason`, so a reason added later fails to
  * compile here rather than falling through to an attempted resume.
  */
+// The branch count is the point: every refusal owns distinct actionable wording.
+// fallow-ignore-next-line complexity
 function resumeRefusalMessage(refusal: ResumeRefusalReason, id: string): string {
 	switch (refusal) {
 		case "deleted":
@@ -303,8 +305,8 @@ function resumeRefusalMessage(refusal: ResumeRefusalReason, id: string): string 
 			return `Agent not found: "${id}". No subagent with this ID belongs to the active parent-session lineage.`;
 		case "parent-transition":
 			return (
-				`Agent "${id}" cannot resume while the parent is navigating its session tree. ` +
-				"Retry with the same ID after navigation settles."
+				`Agent "${id}" cannot resume while its parent session or lineage is changing. ` +
+				"Retry with the same ID after the transition settles."
 			);
 		case "still-running":
 			return (

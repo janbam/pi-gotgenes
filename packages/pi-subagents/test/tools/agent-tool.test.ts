@@ -124,7 +124,7 @@ describe("AgentTool — resume path", () => {
 			);
 		});
 
-		it("tells the parent to retry after tree navigation settles", async () => {
+		it("tells the parent to retry after its session transition settles", async () => {
 			const deps = createToolDeps();
 			mockResumeRefusal(deps, "parent-transition");
 
@@ -136,8 +136,8 @@ describe("AgentTool — resume path", () => {
 			});
 
 			expect(result.content[0].text).toBe(
-				'Agent "agent-1" cannot resume while the parent is navigating its session tree. ' +
-					"Retry with the same ID after navigation settles.",
+				'Agent "agent-1" cannot resume while its parent session or lineage is changing. ' +
+					"Retry with the same ID after the transition settles.",
 			);
 		});
 
