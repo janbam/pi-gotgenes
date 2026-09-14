@@ -6,6 +6,8 @@ name: Release
 #
 # `/ship` dispatches this workflow after the work is on main, then watches it
 # with `ci_find`/`ci_watch` (workflow `release`).
+# This personal fork cuts Git tags and GitHub Releases only. npm publication is
+# deliberately absent rather than guarded by credentials (AGENTS.md).
 on:
   workflow_dispatch:
     inputs:
@@ -55,43 +57,15 @@ jobs:
           EXPECTED_SHA: ${{ inputs.sha }}
         run: ./scripts/release/prepare-release.sh
 
-  publish:
-    needs: prepare
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # npm Trusted Publishing. The publisher must be configured on npmjs.org
-      # against this workflow file; it previously named ci.yml.
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # The exact release commit, not `main` — another push could land
-          # between jobs, and `git tag --points-at HEAD` would then find nothing.
-          ref: ${{ needs.prepare.outputs.sha }}
-          fetch-depth: 0
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          registry-url: "https://registry.npmjs.org"
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Publish released packages
-        run: ./scripts/release/publish-released.sh
-
   github-release:
-    needs: [prepare, publish]
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
+          # Consume the exact Git release commit; main may move between jobs.
           ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
 

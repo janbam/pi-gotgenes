@@ -526,3 +526,24 @@ A commit a pre-commit hook rejected never moved `HEAD`, so a following `git rese
 Back both sides up as files first — `cp` the working state aside, `git show <ref>:<path> >` the baseline — and swap with `cp` in both directions; never lead the restore with `rm -rf <path>`, which the permission gate denies mid-command and leaves a partial tree (Refs #742).
 Staged deletions from `git rm` ride along with the next `git commit` even when you `git add` only unrelated paths — commit with an explicit pathspec (`git commit -- <paths>`) or check `git status` first.
 Before `git commit --amend`, confirm HEAD is your own commit (`git log -1`) — a concurrent session may have committed since yours, and amend rewrites whatever HEAD points at.
+
+## Fork-Owned Operation
+
+`janbam/pi-gotgenes` is Jan's personal-use fork.
+"Private" in this context describes its ownership and intended audience, not necessarily the repository's GitHub visibility.
+This final section overrides inherited upstream instructions above whenever they assume writes to `gotgenes/pi-packages` or publication to npm.
+
+- Keep every repository mutation in Jan-owned repositories.
+  Branches, commits, pull requests, tags, and GitHub Releases for this checkout belong in `janbam/pi-gotgenes`; issue mutations likewise target the appropriate Jan-owned repository.
+  Treat `gotgenes/pi-packages` and every other upstream remote as read-only unless Jan explicitly authorizes a specific write.
+- Upstream commits and tags may be copied into this fork as immutable history or release baselines.
+  New work and new release references remain fork-owned.
+- Fork-only Pi capabilities may deliberately depend on Jan's Pi fork at `~/src/pi-mono` rather than the published or upstream SDK.
+  Do not replace that dependency merely to regain upstream compatibility.
+- Releases from this fork are Git/GitHub releases only: a version-and-changelog commit, package tags, and GitHub Releases in `janbam/pi-gotgenes`.
+- Never publish this fork's packages to npm or mutate npm registry state.
+  Do not run `npm publish`, `pnpm publish`, the repository's npm publishing scripts, Trusted Publisher configuration, registry-token setup, dist-tag changes, deprecation, or unpublish operations for this fork.
+  Read-only registry queries remain allowed when needed for compatibility research.
+- The fork's release workflow must make npm publication structurally unreachable; missing credentials or an expected publish failure are not safety controls.
+  Before dispatching a release, verify that the workflow contains no npm publishing job and that its GitHub Release job depends directly on Git preparation.
+- Inherited npm-release documentation and scripts describe upstream behavior and may remain for reconciliation context, but they are not executable instructions for this fork.
