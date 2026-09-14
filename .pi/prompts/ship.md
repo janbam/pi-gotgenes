@@ -251,9 +251,10 @@ Skip this step if step 10 was skipped (deferred/batch release, or nothing to rel
 1. Use `ci_find` with workflow `release` and the SHA you passed as `-f sha`, then `ci_watch` the returned `run_id` with `timeout: 600`.
    A dispatched run's `head_sha` is `main`'s tip at dispatch time, so it matches the SHA you pinned.
    If `ci_find` times out, the dispatch's SHA guard most likely failed because `main` moved — check the run list before re-dispatching.
-2. If the `prepare`, `publish`, or `github-release` job failed, stop — do not proceed.
+2. If the `prepare` or `github-release` job failed, stop — do not proceed.
    `prepare` failing means nothing was tagged and the release can simply be re-dispatched.
-   `publish` or `github-release` failing means the tags are already pushed: fix the cause and re-run those jobs rather than re-dispatching, which would refuse on the existing tag.
+   `github-release` failing means the tags are already pushed: fix the cause and re-run that job rather than re-dispatching, which would refuse on the existing tag.
+   This personal fork never publishes to npm; a `publish` job appearing in the workflow is a blocker, not a release stage to run.
 3. After the run succeeds, `git pull --ff-only` to bring the release commit and tags down.
 
 ## 12. Tear down the worktree
