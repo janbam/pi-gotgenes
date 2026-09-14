@@ -57,6 +57,8 @@ export interface SubagentSessionMeta {
   agentMaxTurns: number | undefined;
   /** Parent context prepended to the run prompt, captured at spawn time. */
   parentContext: string | undefined;
+  /** Whether this child still belongs to the parent session's selected lineage. */
+  isCurrent?: () => boolean;
   /** Exact effective inputs that can activate this persisted child again. */
   resumeSpec?: PersistedSubagentSession;
   lifecycle: ChildLifecyclePublisher;
@@ -143,12 +145,14 @@ export class SubagentSession {
     try {
       await session.prompt(effectivePrompt);
       failIfProviderErrored(this.turnFailure.getFailure());
-      this.meta.lifecycle.completed({
-        sessionDir: this.meta.sessionDir,
-        agentName: this.meta.agentName,
-        aborted,
-        steered: softLimitReached,
-      });
+      if (this.meta.isCurrent?.() ?? true) {
+        this.meta.lifecycle.completed({
+          sessionDir: this.meta.sessionDir,
+          agentName: this.meta.agentName,
+          aborted,
+          steered: softLimitReached,
+        });
+      }
     } finally {
       unsubTurns();
       collector.unsubscribe();

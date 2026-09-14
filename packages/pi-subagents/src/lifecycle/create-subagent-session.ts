@@ -165,6 +165,8 @@ export interface SubagentSessionDeps {
 export interface CreateSubagentSessionParams {
   snapshot: ParentSnapshot;
   type: SubagentType;
+  /** Revalidates that asynchronous activation still belongs to the selected parent lineage. */
+  isCurrent?: () => boolean;
   /** Resolved workspace cwd; undefined → parent cwd. */
   cwd?: string;
   /** Parent session identity (file path + session ID). */
@@ -188,6 +190,8 @@ export interface CreateSubagentSessionParams {
 export interface RestoreSubagentSessionParams {
   spec: PersistedSubagentSession;
   type: SubagentType;
+  /** Revalidates that asynchronous restoration still belongs to the selected parent lineage. */
+  isCurrent?: () => boolean;
   modelRegistry: ModelRegistry;
   parentSessionId?: string;
   askParent?: QuestionRecorder;
@@ -209,6 +213,7 @@ export class SubagentSessionRestoreError extends Error {
 /** Fully resolved collaborators shared by fresh creation and durable reopening. */
 interface ActivateSubagentSessionParams {
   type: SubagentType;
+  isCurrent?: () => boolean;
   parentSessionId: string | undefined;
   parentContext: string | undefined;
   sessionDir: string;
@@ -265,6 +270,7 @@ export async function createSubagentSession(
   // Resolve working directory upfront - needed for detectEnv before assembly.
   const effectiveCwd = params.cwd ?? snapshot.cwd;
   const env = await deps.io.detectEnv(deps.exec, effectiveCwd);
+  assertCurrentLineage(params.isCurrent);
 
   // Assemble session configuration (synchronous, no SDK objects).
   const cfg = assembleSessionConfig(
@@ -292,6 +298,7 @@ export async function createSubagentSession(
     cfg.systemPrompt,
     deps,
   );
+  assertCurrentLineage(params.isCurrent);
 
   // Create a persisted SessionManager so transcripts are written in Pi's
   // official JSONL format. Falls back to a temp directory when the parent
@@ -321,6 +328,7 @@ export async function createSubagentSession(
   return activateSubagentSession(
     {
       type,
+      isCurrent: params.isCurrent,
       parentSessionId,
       parentContext: snapshot.parentContext,
       sessionDir,
@@ -362,6 +370,7 @@ export async function restoreSubagentSession(
     spec.systemPrompt,
     deps,
   );
+  assertCurrentLineage(params.isCurrent);
 
   let sessionManager: SessionManagerLike;
   try {
@@ -387,6 +396,7 @@ export async function restoreSubagentSession(
   return activateSubagentSession(
     {
       type: params.type,
+      isCurrent: params.isCurrent,
       parentSessionId: params.parentSessionId,
       parentContext: spec.parentContext,
       sessionDir: spec.sessionDir,
@@ -476,6 +486,14 @@ async function activateSubagentSession(
     thinkingLevel: params.thinkingLevel,
   });
 
+  // The SDK session was allocated across an async boundary. If `/tree` moved
+  // meanwhile, dispose it before publishing the registration event that would
+  // make this old-sibling child externally observable.
+  if (params.isCurrent && !params.isCurrent()) {
+    session.dispose();
+    throw new Error("Subagent no longer belongs to the active parent lineage");
+  }
+
   const subagentSession = new SubagentSession(session, {
     outputFile: params.sessionManager.getSessionFile(),
     sessionId,
@@ -483,6 +501,7 @@ async function activateSubagentSession(
     agentName: params.type,
     agentMaxTurns: params.agentMaxTurns,
     parentContext: params.parentContext,
+    isCurrent: params.isCurrent,
     resumeSpec: params.resumeSpec,
     lifecycle: deps.lifecycle,
   });
@@ -505,10 +524,24 @@ async function activateSubagentSession(
     throw err;
   }
 
+  // Binding may itself cross the branch commit. Preserve the created/disposed
+  // protocol pair for cleanup, but never publish bound or start the child run.
+  if (params.isCurrent && !params.isCurrent()) {
+    await subagentSession.dispose();
+    throw new Error("Subagent no longer belongs to the active parent lineage");
+  }
+
   // Every child session_start handler has now run, so this is the first — and
   // only — moment a parent can observe what the child's extensions installed.
   // Deliberately outside the try above: a child whose binding threw never ran.
   deps.lifecycle.bound({ sessionId, parentSessionId: params.parentSessionId });
 
   return subagentSession;
+}
+
+/** Refuse asynchronous activation after its record leaves the selected lineage. */
+function assertCurrentLineage(isCurrent: (() => boolean) | undefined): void {
+  if (isCurrent && !isCurrent()) {
+    throw new Error("Subagent no longer belongs to the active parent lineage");
+  }
 }

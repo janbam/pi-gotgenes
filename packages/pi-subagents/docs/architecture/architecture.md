@@ -358,10 +358,10 @@ src/
 │   └── session-dir.ts              session directory derivation
 │
 ├── lifecycle/                      agent execution and state tracking
-│   ├── subagent-manager.ts         active parent-lineage cache + observer wiring + memory-retention sweep; activates durable records, settles and silences records leaving a `/tree` ancestry, preserves sibling-branch records, and lazily restores at the resume choke point
+│   ├── subagent-manager.ts         live-ancestry-guarded parent-lineage cache + observer wiring + memory-retention sweep; activates durable records, tracks resume preflights, settles and silences records leaving a `/tree` ancestry, preserves sibling-branch records, and lazily restores at the resume choke point
 │   ├── subagent-persistence.ts     versioned session-global registry: durable child metadata, branch-ancestry filtering, hidden sibling preservation, and deletion tombstones
-│   ├── create-subagent-session.ts  shared child activation pipeline over fresh allocation or exact persisted SessionManager reopening
-│   ├── subagent-session.ts         born-complete child session: turn loop, steer, shutdown-then-dispose teardown
+│   ├── create-subagent-session.ts  shared child activation pipeline over fresh allocation or exact persisted SessionManager reopening; revalidates parent lineage across asynchronous SDK activation
+│   ├── subagent-session.ts         born-complete child session: lineage-guarded completion lifecycle, turn loop, steer, shutdown-then-dispose teardown
 │   ├── turn-limits.ts              normalizeMaxTurns (turn-count policy)
 │   ├── subagent.ts                 owns full execution lifecycle (run, resume, abort, steer, wait-until-settled); a teardown with no result text to carry its addendum records it as a notice and announces one produced after delivery; answers why a resume would be refused (resumeRefusal, including a live run), which the resume choke point and every result carrier read rather than re-deriving; reports a resume's start as well as its end
 │   ├── subagent-state.ts           lifecycle status + metrics + result-delivery value object (transitions, accumulators, classification predicates); delivery carries a revocable carrier claim, a one-way consumption latch, and a per-run update ledger that renders only what no announcement delivered

@@ -286,6 +286,65 @@ describe("createSubagentSession — lifecycle ordering", () => {
     expect(lifecycle.completed).not.toHaveBeenCalled();
     expect(lifecycle.disposed).not.toHaveBeenCalled();
   });
+
+  it("abandons delayed SDK creation when the parent lineage changed", async () => {
+    const creationGate = Promise.withResolvers<{ session: ReturnType<typeof createFactorySession> }>();
+    let current = true;
+    io.createSession.mockReturnValue(creationGate.promise);
+    const pending = createSubagentSession(
+      {
+        snapshot: STUB_SNAPSHOT,
+        type: "Explore",
+        isCurrent: () => current,
+      },
+      createSubagentSessionDeps({ io, exec, registry: mockAgentLookup, lifecycle }),
+    );
+    await vi.waitFor(() => {
+      expect(io.createSession).toHaveBeenCalledOnce();
+    });
+
+    // The SDK session crossed the branch commit, so dispose it before any
+    // externally paired child-registration event can escape.
+    current = false;
+    creationGate.resolve({ session });
+    await expect(pending).rejects.toThrow(
+      "Subagent no longer belongs to the active parent lineage",
+    );
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(lifecycle.sessionCreated).not.toHaveBeenCalled();
+    expect(lifecycle.bound).not.toHaveBeenCalled();
+    expect(lifecycle.completed).not.toHaveBeenCalled();
+    expect(lifecycle.disposed).not.toHaveBeenCalled();
+  });
+
+  it("disposes a registered child when extension binding crosses the lineage", async () => {
+    const bindingGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+    let current = true;
+    session.bindExtensions.mockReturnValue(bindingGate.promise);
+    const pending = createSubagentSession(
+      {
+        snapshot: STUB_SNAPSHOT,
+        type: "Explore",
+        isCurrent: () => current,
+      },
+      createSubagentSessionDeps({ io, exec, registry: mockAgentLookup, lifecycle }),
+    );
+    await vi.waitFor(() => {
+      expect(lifecycle.sessionCreated).toHaveBeenCalledOnce();
+    });
+
+    // session-created already registered the child synchronously. Preserve its
+    // disposal pair, but publish neither bound nor a runnable child afterward.
+    current = false;
+    bindingGate.resolve();
+    await expect(pending).rejects.toThrow(
+      "Subagent no longer belongs to the active parent lineage",
+    );
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(lifecycle.bound).not.toHaveBeenCalled();
+    expect(lifecycle.completed).not.toHaveBeenCalled();
+    expect(lifecycle.disposed).toHaveBeenCalledOnce();
+  });
 });
 
 describe("createSubagentSession — dispose on creation failure", () => {

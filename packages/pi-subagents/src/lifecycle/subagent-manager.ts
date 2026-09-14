@@ -89,9 +89,9 @@ interface ResolvedSpawn {
   isBackground: boolean;
 }
 
-/** Stable service error for a spawn re-entering the pre-tree settlement boundary. */
-const TREE_TRANSITION_SPAWN_ERROR =
-  "Cannot spawn a subagent while parent tree navigation is in progress";
+/** Stable service error for a spawn re-entering a parent-session transition. */
+const PARENT_TRANSITION_SPAWN_ERROR =
+  "Cannot spawn a subagent while a parent session transition is in progress";
 
 /**
  * Session-retention windows (minutes). `SettingsManager` satisfies this
@@ -251,9 +251,12 @@ export class SubagentManager {
   private hiddenTombstones: PersistedSubagentTombstone[] = [];
   private registryIncompatibility?: string;
   /** True only while the old branch's departing records are being drained. */
-  private preparingTree = false;
+  /** Closes spawn/resume admission while the active parent projection is changing. */
+  private parentTransitioning = false;
   /** Records settling after leaf commit whose effects must not reach the selected sibling. */
   private readonly silencedRecords = new Set<Subagent>();
+  /** Session/workspace restoration handles that must settle before lineage projection changes. */
+  private readonly resumePreparations = new Map<Subagent, Promise<ResumeRefusalReason | undefined>>();
 
   /** The registered workspace provider, or undefined when none is registered. */
   get workspaceProvider(): WorkspaceProvider | undefined {
@@ -298,50 +301,52 @@ export class SubagentManager {
   private buildObserver(spawnObserver?: SubagentLifecycleObserver): SubagentLifecycleObserver {
     return {
       onStarted: (agent) => {
-        if (!this.silencedRecords.has(agent)) {
+        if (this.shouldPublishRecord(agent)) {
           this.observer?.onSubagentStarted(agent);
         }
         this.persistRegistry();
       },
       onSessionCreated: (agent) => {
-        spawnObserver?.onSessionCreated?.(agent);
+        if (this.shouldPublishRecord(agent)) {
+          spawnObserver?.onSessionCreated?.(agent);
+        }
         this.persistRegistry();
       },
       // Terminal transitions are normally reported for every agent. A record
       // silenced during branch reconciliation is the exception: its facts
       // belong to the departed sibling, while registry persistence still runs.
       onRunFinished: (agent) => {
-        if (!this.silencedRecords.has(agent)) {
+        if (this.shouldPublishRecord(agent)) {
           try { this.observer?.onSubagentCompleted(agent); } catch (err) { debugLog("onSubagentCompleted observer", err); }
         }
         this.persistRegistry();
       },
       onResumeStarted: (agent) => {
-        if (!this.silencedRecords.has(agent)) {
+        if (this.shouldPublishRecord(agent)) {
           try { this.observer?.onSubagentResuming(agent); } catch (err) { debugLog("onSubagentResuming observer", err); }
         }
         this.persistRegistry();
       },
       onResumeFinished: (agent) => {
-        if (!this.silencedRecords.has(agent)) {
+        if (this.shouldPublishRecord(agent)) {
           try { this.observer?.onSubagentResumed(agent); } catch (err) { debugLog("onSubagentResumed observer", err); }
         }
         this.persistRegistry();
       },
       onUpdateSent: (agent, message) => {
-        if (!this.silencedRecords.has(agent)) {
+        if (this.shouldPublishRecord(agent)) {
           this.observer?.onSubagentUpdate?.(agent, message);
         }
         this.persistRegistry();
       },
       onWorkspaceNotice: (agent, notice) => {
-        if (!this.silencedRecords.has(agent)) {
+        if (this.shouldPublishRecord(agent)) {
           this.observer?.onSubagentWorkspaceNotice?.(agent, notice);
         }
         this.persistRegistry();
       },
       onCompacted: (agent, info) => {
-        if (!this.silencedRecords.has(agent)) {
+        if (this.shouldPublishRecord(agent)) {
           this.observer?.onSubagentCompacted(agent, info);
         }
         this.persistRegistry();
@@ -350,6 +355,27 @@ export class SubagentManager {
         this.persistRegistry();
       },
     };
+  }
+
+  /** True when a record still belongs to the selected branch and is safe to announce. */
+  private shouldPublishRecord(record: Subagent): boolean {
+    return !this.silencedRecords.has(record) && this.isRecordVisible(record);
+  }
+
+  /** Enforce lineage directly from Pi's live branch, before lifecycle projection catches up. */
+  private isRecordVisible(record: Subagent): boolean {
+    if (this.agents.get(record.id) !== record) return false;
+    // A manager can run without parent persistence in headless/API use. With no
+    // active session there is no competing lineage to filter against.
+    if (!this.activeSession) return true;
+    if (record.parentEntryId === null) return true;
+    return this.activeSession.getBranch().some(
+      (entry) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        "id" in entry &&
+        entry.id === record.parentEntryId,
+    );
   }
 
   /** Activate the registry belonging to the selected parent session. */
@@ -384,10 +410,10 @@ export class SubagentManager {
 
     // Close synchronous service admission before any terminal observer can
     // re-enter the manager from the old branch.
-    if (this.preparingTree) {
+    if (this.parentTransitioning) {
       throw new Error("Parent tree navigation preparation is already in progress");
     }
-    this.preparingTree = true;
+    this.parentTransitioning = true;
 
     try {
       // An anchor remains visible on both branches only through their common
@@ -398,6 +424,11 @@ export class SubagentManager {
           record.parentEntryId !== null &&
           !sharedAncestry.has(record.parentEntryId),
       );
+
+      // A resume may already be restoring a session when navigation begins.
+      // Its post-restore transition check refuses before
+      // a resumed turn starts; wait for that preflight before releasing state.
+      await Promise.allSettled(this.pendingResumePreparations(departing));
 
       // Terminal observers run while the old leaf is still active, keeping
       // branch-local history and notifications out of the selected sibling.
@@ -415,7 +446,7 @@ export class SubagentManager {
     } finally {
       // Pi emits no post-event when a later extension cancels navigation. Reopen
       // here; reconcileTree catches any old-lineage work admitted before commit.
-      this.preparingTree = false;
+      this.parentTransitioning = false;
     }
   }
 
@@ -444,7 +475,8 @@ export class SubagentManager {
     );
     for (const record of departing) this.silencedRecords.add(record);
     try {
-      for (const record of departing) this.abort(record.id);
+      await Promise.allSettled(this.pendingResumePreparations(departing));
+      for (const record of departing) this.stopRecord(record);
       await Promise.allSettled(this.unsettledRunHandles(departing));
       await Promise.allSettled(
         departing.map((record) => record.releaseSession()),
@@ -483,8 +515,10 @@ export class SubagentManager {
 
     // Fail closed without leaking sessions or workspaces from the previously
     // projected branch.
+    this.registryIncompatibility = reason;
     for (const record of records) this.silencedRecords.add(record);
     try {
+      await Promise.allSettled(this.pendingResumePreparations(records));
       this.abortAll();
       await Promise.allSettled(this.unsettledRunHandles(records));
       await Promise.allSettled(records.map((record) => record.releaseSession()));
@@ -492,7 +526,6 @@ export class SubagentManager {
       for (const record of records) this.silencedRecords.delete(record);
     }
 
-    this.registryIncompatibility = reason;
     this.agents.clear();
     this.hiddenRecords = [];
     this.tombstones.clear();
@@ -532,6 +565,7 @@ export class SubagentManager {
         observer: this.buildObserver(),
         getRunConfig: this.getRunConfig,
         getWorkspaceProvider: () => this._workspaceProvider,
+        isCurrent: (agent) => this.isRecordVisible(agent),
         parentSession: { ...parentSession, toolCallId: persisted.toolCallId },
       },
     });
@@ -565,35 +599,57 @@ export class SubagentManager {
       .filter((promise): promise is Promise<void> => promise !== undefined);
   }
 
+  /** Restoration preflights currently owned by the supplied records. */
+  private pendingResumePreparations(records: readonly Subagent[]): Promise<ResumeRefusalReason | undefined>[] {
+    return records.flatMap((record) => {
+      const preparation = this.resumePreparations.get(record);
+      return preparation ? [preparation] : [];
+    });
+  }
+
   /** Persist and release the outgoing parent view without deleting durable records. */
   async deactivate(): Promise<void> {
     if (!this.activeSession) return;
+    if (this.parentTransitioning) {
+      throw new Error("A parent session transition is already in progress");
+    }
+    this.parentTransitioning = true;
 
-    // Capture handles while records are still active: abort transitions them
-    // synchronously, but their factories, JSONL writes, and terminal observers
-    // may continue until the already-published promises settle.
-    const inFlight = this.pendingPromises();
-    this.abortAll();
-    this.persistRegistry();
-    await Promise.allSettled(inFlight);
+    try {
+      const records = [...this.agents.values()];
 
-    // Include any work admitted concurrently before the lifecycle boundary
-    // finished, then persist only settled terminal state.
-    await this.waitForAll();
-    this.persistRegistry();
+      // A restore admitted before the switch must revalidate against the closed
+      // transition gate and release its reconstructed resources before teardown.
+      await Promise.allSettled(this.pendingResumePreparations(records));
 
-    const releases = [...this.agents.values()].map((record) =>
-      record.releaseSession(),
-    );
-    await Promise.allSettled(releases);
-    this.persistRegistry();
+      // Capture handles while records are still active: abort transitions them
+      // synchronously, but their factories, JSONL writes, and terminal observers
+      // may continue until the already-published promises settle.
+      const inFlight = this.pendingPromises();
+      this.abortAll();
+      this.persistRegistry();
+      await Promise.allSettled(inFlight);
 
-    this.agents.clear();
-    this.hiddenRecords = [];
-    this.tombstones.clear();
-    this.hiddenTombstones = [];
-    this.activeSession = undefined;
-    this.registryIncompatibility = undefined;
+      // Include any work admitted concurrently before the lifecycle boundary
+      // finished, then persist only settled terminal state.
+      await this.waitForAll();
+      this.persistRegistry();
+
+      const releases = [...this.agents.values()].map((record) =>
+        record.releaseSession(),
+      );
+      await Promise.allSettled(releases);
+      this.persistRegistry();
+
+      this.agents.clear();
+      this.hiddenRecords = [];
+      this.tombstones.clear();
+      this.hiddenTombstones = [];
+      this.activeSession = undefined;
+      this.registryIncompatibility = undefined;
+    } finally {
+      this.parentTransitioning = false;
+    }
   }
 
   /** Write active and hidden branch records as one session-global registry. */
@@ -677,7 +733,7 @@ export class SubagentManager {
     prompt: string,
     options: AgentSpawnConfig,
   ): string {
-    if (this.preparingTree) throw new Error(TREE_TRANSITION_SPAWN_ERROR);
+    if (this.parentTransitioning) throw new Error(PARENT_TRANSITION_SPAWN_ERROR);
 
     const { type, isBackground } = resolved;
     const id = randomUUID().slice(0, 17);
@@ -699,6 +755,7 @@ export class SubagentManager {
         observer: this.buildObserver(options.observer),
         getRunConfig: this.getRunConfig,
         getWorkspaceProvider: () => this._workspaceProvider,
+        isCurrent: (agent) => this.isRecordVisible(agent),
         model: options.model,
         maxTurns: options.maxTurns,
         thinkingLevel: options.thinkingLevel,
@@ -740,7 +797,7 @@ export class SubagentManager {
    * to Subagent.resume(), which owns the observer subscription lifecycle.
    */
   async resume(id: string, prompt: string, options: ResumeCallOptions = {}): Promise<ResumeOutcome> {
-    if (this.preparingTree) {
+    if (this.parentTransitioning) {
       return { kind: "refused", reason: "parent-transition" };
     }
     if (this.registryIncompatibility) {
@@ -749,13 +806,22 @@ export class SubagentManager {
     if (this.tombstones.has(id)) {
       return { kind: "refused", reason: "deleted" };
     }
-    const agent = this.agents.get(id);
+    const agent = this.getRecord(id);
     if (!agent) return { kind: "refused", reason: "unknown-agent" };
     const refusal = agent.resumeRefusal;
     if (refusal && refusal !== "unavailable" && refusal !== "incompatible") {
       return { kind: "refused", reason: refusal };
     }
-    const restoreRefusal = await agent.prepareResume();
+    const preparation = this.prepareRecordForResume(agent);
+    this.resumePreparations.set(agent, preparation);
+    let restoreRefusal: ResumeRefusalReason | undefined;
+    try {
+      restoreRefusal = await preparation;
+    } finally {
+      if (this.resumePreparations.get(agent) === preparation) {
+        this.resumePreparations.delete(agent);
+      }
+    }
     if (restoreRefusal) return { kind: "refused", reason: restoreRefusal };
     // Before the resume starts: resetForResume runs synchronously inside
     // resume(), so a claim taken afterwards would miss the terminal edge.
@@ -764,20 +830,46 @@ export class SubagentManager {
     return { kind: "resumed", record: agent };
   }
 
+  /** Restore one child, then revalidate parent state before a resumed turn may start. */
+  private async prepareRecordForResume(agent: Subagent): Promise<ResumeRefusalReason | undefined> {
+    const restoreRefusal = await agent.prepareResume();
+
+    // Restoration crosses asynchronous filesystem and SDK boundaries. Keep
+    // this release inside the tracked preflight so `/tree` also awaits cleanup.
+    if (this.parentTransitioning || !this.isRecordVisible(agent)) {
+      await agent.releaseSession();
+      this.persistRegistry();
+      return "parent-transition";
+    }
+    if (restoreRefusal) return restoreRefusal;
+    if (this.registryIncompatibility) {
+      await agent.releaseSession();
+      return "incompatible";
+    }
+    return undefined;
+  }
+
   getRecord(id: string): Subagent | undefined {
-    return this.agents.get(id);
+    const record = this.agents.get(id);
+    return record && this.isRecordVisible(record) ? record : undefined;
   }
 
   listAgents(): Subagent[] {
-    return [...this.agents.values()].sort(
+    return [...this.agents.values()].filter((record) =>
+      this.isRecordVisible(record)).sort(
       (a, b) => b.startedAt - a.startedAt,
     );
   }
 
   abort(id: string): boolean {
-    const record = this.agents.get(id);
+    const record = this.getRecord(id);
     if (!record) return false;
 
+    return this.stopRecord(record);
+  }
+
+  /** Stop one known record without re-applying the public lineage lookup. */
+  private stopRecord(record: Subagent): boolean {
     // A queued agent has not started; stop it through the same terminal funnel
     // a running agent's stop uses. Its scheduled thunk becomes a no-op (status
     // guard) when its slot finally opens.
@@ -832,6 +924,7 @@ export class SubagentManager {
   async clearCompleted(): Promise<void> {
     const teardowns: Promise<void>[] = [];
     for (const [id, record] of this.agents) {
+      if (!this.isRecordVisible(record)) continue;
       if (record.isActive()) continue;
       teardowns.push(this.removeRecord(id, record));
     }
@@ -841,7 +934,7 @@ export class SubagentManager {
   /** Whether any agents are still running or queued. */
   // fallow-ignore-next-line unused-class-member
   hasRunning(): boolean {
-    return [...this.agents.values()].some(r => r.isActive());
+    return this.listAgents().some((record) => record.isActive());
   }
 
   /** Abort all running and queued agents immediately. */

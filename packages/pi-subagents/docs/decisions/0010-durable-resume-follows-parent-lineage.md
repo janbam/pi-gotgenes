@@ -38,6 +38,9 @@ Spawn and resume admission closes during that drain because a lifecycle subscrib
 Pi emits no completion event when a later extension cancels navigation, so admission reopens when preparation settles rather than waiting for `session_tree`.
 After a successful leaf change, reconciliation silently settles any old-lineage child admitted in the intervening window, releases its live resources, and preserves its final record as a hidden sibling.
 Shared-ancestor children retain their live object and continue without interruption.
+Service queries derive visibility directly from the session manager's current branch rather than waiting for the asynchronous reconciliation cache to finish.
+Resume tracks session/workspace restoration as an in-flight preflight and revalidates that live ancestry before starting the turn loop.
+Fresh and restored child activation carry the same predicate across their asynchronous SDK boundaries; if lineage changes, activation disposes the partial child before it can run, and a child already registered on the process-global lifecycle bus emits only the disposal needed to balance that registration.
 
 ### Child sessions reopen exactly and lazily
 
@@ -67,7 +70,7 @@ If a crash left the registered checkout live, restoration reuses it verbatim so 
 
 - Parent compaction, continuation, reopening, and session switching preserve same-ID resume within the active ancestry.
 - A sibling branch or unrelated parent cannot inspect, steer, delete, or resume another lineage's records.
-- A transient `parent-transition` refusal keeps a reentrant resume retryable under the same ID, while branch reconciliation prevents lifecycle events, history entries, results, and notifications from crossing into a selected sibling.
+- A transient `parent-transition` refusal keeps a reentrant or asynchronously crossing resume retryable under the same ID, while live ancestry checks and branch reconciliation prevent parent-facing lifecycle events, history entries, results, and notifications from crossing into a selected sibling.
 - Durable registry size is bounded by the parent-session artifact's lifetime rather than an arbitrary expiry clock.
 - Missing repositories, revisions, transcripts, or providers remain visible as stable fail-closed refusals.
 - The provider contract is intentionally breaking because the old prepare/dispose bracket could not represent a resumable terminal state.

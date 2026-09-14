@@ -111,6 +111,8 @@ export interface SubagentExecution {
 	prompt: string;
 	/** Parent working directory handed to a workspace provider's prepare(). */
 	baseCwd: string;
+	/** Live lineage predicate applied at asynchronous child-session boundaries. */
+	isCurrent?: (agent: Subagent) => boolean;
 	observer?: SubagentLifecycleObserver;
 	getRunConfig?: () => RunConfig;
 	/** Resolves the registered workspace provider (if any) at run-start. */
@@ -388,6 +390,7 @@ export class Subagent {
 			this.subagentSession = await this.execution.createSubagentSession({
 				snapshot: this.execution.snapshot,
 				type: this.type,
+				isCurrent: () => this.execution.isCurrent?.(this) ?? true,
 				cwd,
 				parentSession: this.execution.parentSession,
 				model: this.execution.model,
@@ -555,6 +558,7 @@ export class Subagent {
 			this.subagentSession = await this.execution.restoreSubagentSession({
 				spec: this._resumeSpec,
 				type: this.type,
+				isCurrent: () => this.execution.isCurrent?.(this) ?? true,
 				modelRegistry: this.execution.snapshot.modelRegistry,
 				parentSessionId: this.execution.parentSession?.parentSessionId,
 				askParent: (question) => { this.setPendingQuestion(question); },
@@ -567,6 +571,9 @@ export class Subagent {
 			this.execution.observer?.onSessionCreated?.(this);
 			return undefined;
 		} catch (err) {
+			// A failed session reopen must not leave the reconstructed workspace
+			// live when no resumed turn can own it.
+			this.suspendWorkspaceQuietly(this.status);
 			this._restoreRefusal = err instanceof SubagentSessionRestoreError || err instanceof WorkspaceRestoreError
 				? err.reason
 				: "unavailable";

@@ -217,7 +217,8 @@ Durable records live for the parent-session lineage rather than a wall-clock TTL
 Parent compaction and session navigation do not delete them; deleting the parent session ends their lifetime.
 An explicit record deletion leaves a branch-scoped tombstone so a later resume returns `deleted` instead of degrading to `unknown-agent`.
 During `/tree`, children leaving the selected ancestry settle before navigation when possible.
-The manager rejects reentrant spawn/resume calls during that settlement, then silently settles any old-branch work admitted before the leaf actually changes so its lifecycle events, history entries, results, and notifications cannot leak into the selected sibling.
+The manager evaluates every query and resume against Pi's live branch, rejects reentrant spawn/resume calls during settlement, and silently settles old-branch work admitted before the leaf changes so parent-facing lifecycle events, history entries, results, and notifications cannot leak into the selected sibling.
+Asynchronous child activation and resume restoration revalidate lineage before a child can run; a registration already published before the leaf changed still emits its paired disposal event so process-global consumers can release it.
 
 The shutdown event is dispatched and awaited **before** the child's `AgentSession` is disposed, so a handler still has a live context and can close what it opened — stdio subprocesses, sockets, timers, file handles.
 Each child's shutdown is bounded: a handler that never resolves is abandoned after a few seconds and disposal proceeds, so one misbehaving extension cannot stall the parent's teardown or Pi's exit.
