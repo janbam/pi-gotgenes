@@ -420,6 +420,40 @@ describe("SubagentManager", () => {
         reason: "incompatible",
       });
     });
+
+    it("keeps an explicit deletion reason stable across parent reactivation", async () => {
+      const parent = parentState();
+      const first = createManager({
+        createSubagentSession: createSessionFactory().factory,
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(first);
+      first.activate(parent.ctx);
+      const id = first.spawn(STUB_SNAPSHOT, "Explore", "inspect", {
+        description: "deletable child",
+        background: { kind: "explicit", isBackground: true },
+        parentSession: { parentEntryId: "entry-1" },
+      });
+      await first.getRecord(id)!.promise;
+
+      await first.clearCompleted();
+
+      await expect(first.resume(id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+      await first.deactivate();
+
+      const second = createManager({
+        writeSessionState: parent.writeSessionState,
+      }).manager;
+      managers.push(second);
+      second.activate(parent.ctx);
+      await expect(second.resume(id, "continue")).resolves.toEqual({
+        kind: "refused",
+        reason: "deleted",
+      });
+    });
   });
 
   describe("spawn", () => {

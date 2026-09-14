@@ -294,6 +294,11 @@ ${guidelines}
  */
 function resumeRefusalMessage(refusal: ResumeRefusalReason, id: string): string {
 	switch (refusal) {
+		case "deleted":
+			return (
+				`Agent "${id}" was explicitly deleted from this parent-session lineage. ` +
+				"Its durable conversation handle cannot be resumed."
+			);
 		case "unknown-agent":
 			return `Agent not found: "${id}". No subagent with this ID belongs to the active parent-session lineage.`;
 		case "still-running":

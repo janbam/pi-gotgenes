@@ -107,6 +107,23 @@ describe("AgentTool — resume path", () => {
 			);
 		});
 
+		it("distinguishes an explicitly deleted durable handle", async () => {
+			const deps = createToolDeps();
+			mockResumeRefusal(deps, "deleted");
+
+			const result = await execute(deps, {
+				prompt: "continue",
+				description: "resume",
+				subagent_type: "general-purpose",
+				resume: "deleted-agent",
+			});
+
+			expect(result.content[0].text).toBe(
+				'Agent "deleted-agent" was explicitly deleted from this parent-session lineage. ' +
+					"Its durable conversation handle cannot be resumed.",
+			);
+		});
+
 		it("names a missing session without offering a cleanup story it cannot tell", async () => {
 			const deps = createToolDeps();
 			mockResumeRefusal(deps, "no-session");

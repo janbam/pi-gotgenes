@@ -38,7 +38,7 @@ export class GetResultTool {
 	) {
 		const record = this.manager.getRecord(params.agent_id);
 		if (!record) {
-			return textResult<GetResultDetails>(`Agent not found: "${params.agent_id}". Records are cleared at session start/switch, so it may be from a previous session.`);
+			return textResult<GetResultDetails>(`Agent not found: "${params.agent_id}". No subagent with this ID belongs to the active parent-session lineage.`);
 		}
 
 		// Wait for completion if requested. The record owns the decision of whether

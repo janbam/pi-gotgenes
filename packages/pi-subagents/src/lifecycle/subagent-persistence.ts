@@ -57,9 +57,19 @@ export interface PersistedSubagentRecord {
   workspace?: PersistedWorkspace;
 }
 
+/** Durable reason an otherwise valid ID no longer has a resumable record. */
+export interface PersistedSubagentTombstone {
+  id: string;
+  /** Preserve the deleted record's branch visibility boundary. */
+  parentEntryId: string | null;
+  reason: "deleted";
+  deletedAt: number;
+}
+
 interface PersistedSubagentRegistry {
   version: typeof REGISTRY_VERSION;
   records: PersistedSubagentRecord[];
+  tombstones: PersistedSubagentTombstone[];
 }
 
 /** Narrow parent-session storage and ancestry boundary used by the registry. */
@@ -80,6 +90,8 @@ export type SubagentRegistryLoad =
       kind: "ready";
       records: PersistedSubagentRecord[];
       hiddenRecords: PersistedSubagentRecord[];
+      tombstones: PersistedSubagentTombstone[];
+      hiddenTombstones: PersistedSubagentTombstone[];
     }
   | { kind: "incompatible"; reason: string };
 
@@ -89,7 +101,13 @@ export function loadSubagentRegistry(
 ): SubagentRegistryLoad {
   const stored = session.getSessionState(SUBAGENT_REGISTRY_KEY);
   if (stored === undefined) {
-    return { kind: "ready", records: [], hiddenRecords: [] };
+    return {
+      kind: "ready",
+      records: [],
+      hiddenRecords: [],
+      tombstones: [],
+      hiddenTombstones: [],
+    };
   }
 
   // Reject unknown envelopes before inspecting records, so a newer writer is
@@ -117,6 +135,20 @@ export function loadSubagentRegistry(
     }
     records.push(candidate);
   }
+  const tombstoneValues = stored.tombstones ?? [];
+  if (!Array.isArray(tombstoneValues)) {
+    return { kind: "incompatible", reason: "registry tombstones are malformed" };
+  }
+  const tombstones: PersistedSubagentTombstone[] = [];
+  for (const [index, candidate] of tombstoneValues.entries()) {
+    if (!isPersistedTombstone(candidate)) {
+      return {
+        kind: "incompatible",
+        reason: `registry tombstone ${index} is malformed`,
+      };
+    }
+    tombstones.push(candidate);
+  }
 
   // Session state survives /tree navigation; the branch ancestry restores the
   // missing branch locality and prevents sibling records from leaking through.
@@ -132,10 +164,21 @@ export function loadSubagentRegistry(
       candidate.parentEntryId === null || ancestry.has(candidate.parentEntryId),
   );
   const visibleIds = new Set(visible.map((candidate) => candidate.id));
+  const visibleTombstones = tombstones.filter(
+    (candidate) =>
+      candidate.parentEntryId === null || ancestry.has(candidate.parentEntryId),
+  );
+  const visibleTombstoneIds = new Set(
+    visibleTombstones.map((candidate) => candidate.id),
+  );
   return {
     kind: "ready",
     records: visible,
     hiddenRecords: records.filter((candidate) => !visibleIds.has(candidate.id)),
+    tombstones: visibleTombstones,
+    hiddenTombstones: tombstones.filter(
+      (candidate) => !visibleTombstoneIds.has(candidate.id),
+    ),
   };
 }
 
@@ -143,12 +186,27 @@ export function loadSubagentRegistry(
 export function saveSubagentRegistry(
   write: SubagentRegistryWriter,
   records: readonly PersistedSubagentRecord[],
+  tombstones: readonly PersistedSubagentTombstone[] = [],
 ): void {
   const registry: PersistedSubagentRegistry = {
     version: REGISTRY_VERSION,
     records: [...records],
+    tombstones: [...tombstones],
   };
   write(SUBAGENT_REGISTRY_KEY, registry as unknown as JsonValue);
+}
+
+/** True when persisted JSON names one branch-scoped explicit deletion. */
+function isPersistedTombstone(
+  value: unknown,
+): value is PersistedSubagentTombstone {
+  return (
+    isObject(value) &&
+    typeof value.id === "string" &&
+    (value.parentEntryId === null || typeof value.parentEntryId === "string") &&
+    value.reason === "deleted" &&
+    typeof value.deletedAt === "number"
+  );
 }
 
 /** True when a decoded JSON value is one complete current-version record. */

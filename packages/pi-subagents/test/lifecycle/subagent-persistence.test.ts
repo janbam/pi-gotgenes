@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   loadSubagentRegistry,
   type PersistedSubagentRecord,
+  type PersistedSubagentTombstone,
   SUBAGENT_REGISTRY_KEY,
   saveSubagentRegistry,
 } from "#src/lifecycle/subagent-persistence";
@@ -47,6 +48,14 @@ function record(
   };
 }
 
+/** Build one durable deletion marker on the requested parent branch. */
+function tombstone(
+  id: string,
+  parentEntryId: string | null,
+): PersistedSubagentTombstone {
+  return { id, parentEntryId, reason: "deleted", deletedAt: 300 };
+}
+
 /** Build a session-state boundary over the supplied stored value and active branch IDs. */
 function session(
   stored: unknown,
@@ -64,6 +73,8 @@ describe("loadSubagentRegistry", () => {
       kind: "ready",
       records: [],
       hiddenRecords: [],
+      tombstones: [],
+      hiddenTombstones: [],
     });
   });
 
@@ -84,6 +95,8 @@ describe("loadSubagentRegistry", () => {
       kind: "ready",
       records: [ancestor, current],
       hiddenRecords: [sibling],
+      tombstones: [],
+      hiddenTombstones: [],
     });
   });
 
@@ -92,7 +105,13 @@ describe("loadSubagentRegistry", () => {
 
     expect(
       loadSubagentRegistry(session({ version: 1, records: [root] }, [])),
-    ).toEqual({ kind: "ready", records: [root], hiddenRecords: [] });
+    ).toEqual({
+      kind: "ready",
+      records: [root],
+      hiddenRecords: [],
+      tombstones: [],
+      hiddenTombstones: [],
+    });
   });
 
   it("hides every branch-anchored record from an unrelated empty lineage", () => {
@@ -102,6 +121,25 @@ describe("loadSubagentRegistry", () => {
       kind: "ready",
       records: [],
       hiddenRecords: stored.records,
+      tombstones: [],
+      hiddenTombstones: [],
+    });
+  });
+
+  it("applies the same lineage boundary to durable deletion markers", () => {
+    const visible = tombstone("visible", "entry-1");
+    const hidden = tombstone("hidden", "sibling-entry");
+
+    expect(loadSubagentRegistry(session({
+      version: 1,
+      records: [],
+      tombstones: [visible, hidden],
+    }))).toEqual({
+      kind: "ready",
+      records: [],
+      hiddenRecords: [],
+      tombstones: [visible],
+      hiddenTombstones: [hidden],
     });
   });
 
@@ -130,12 +168,13 @@ describe("saveSubagentRegistry", () => {
   it("writes one versioned custom JSON object under the extension key", () => {
     const write = vi.fn();
     const records = [record()];
+    const tombstones = [tombstone("deleted-agent", "entry-1")];
 
-    saveSubagentRegistry(write, records);
+    saveSubagentRegistry(write, records, tombstones);
 
     expect(write).toHaveBeenCalledWith(
       SUBAGENT_REGISTRY_KEY,
-      { version: 1, records },
+      { version: 1, records, tombstones },
     );
   });
 });

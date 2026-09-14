@@ -20,6 +20,7 @@ import { type ResumeRefusal, Subagent, type SubagentLifecycleObserver } from "#s
 import {
   loadSubagentRegistry,
   type PersistedSubagentRecord,
+  type PersistedSubagentTombstone,
   type SubagentRegistrySession,
   type SubagentRegistryWriter,
   saveSubagentRegistry,
@@ -54,7 +55,7 @@ export interface SpawnTypeResolver {
  * Widens the record's own vocabulary by the one refusal that is not a fact
  * about a record: an id no record answers to.
  */
-export type ResumeRefusalReason = ResumeRefusal | "unknown-agent";
+export type ResumeRefusalReason = ResumeRefusal | "unknown-agent" | "deleted";
 
 /**
  * What a resume attempt produced: the record whose run was restarted, or the
@@ -238,6 +239,8 @@ export class SubagentManager {
   private _workspaceProvider?: WorkspaceProvider;
   private activeSession?: SubagentRegistrySession;
   private hiddenRecords: PersistedSubagentRecord[] = [];
+  private tombstones = new Map<string, PersistedSubagentTombstone>();
+  private hiddenTombstones: PersistedSubagentTombstone[] = [];
   private registryIncompatibility?: string;
 
   /** The registered workspace provider, or undefined when none is registered. */
@@ -339,6 +342,10 @@ export class SubagentManager {
 
     this.registryIncompatibility = undefined;
     this.hiddenRecords = loaded.hiddenRecords;
+    this.tombstones = new Map(
+      loaded.tombstones.map((tombstone) => [tombstone.id, tombstone]),
+    );
+    this.hiddenTombstones = loaded.hiddenTombstones;
     const snapshot: ParentSnapshot = {
       cwd: ctx.cwd,
       systemPrompt: ctx.getSystemPrompt(),
@@ -398,6 +405,8 @@ export class SubagentManager {
 
     this.agents.clear();
     this.hiddenRecords = [];
+    this.tombstones.clear();
+    this.hiddenTombstones = [];
     this.activeSession = undefined;
     this.registryIncompatibility = undefined;
   }
@@ -407,10 +416,14 @@ export class SubagentManager {
     if (!this.activeSession || !this.writeSessionState || this.registryIncompatibility) {
       return;
     }
-    saveSubagentRegistry(this.writeSessionState, [
-      ...this.hiddenRecords,
-      ...[...this.agents.values()].map((record) => record.toPersistedRecord()),
-    ]);
+    saveSubagentRegistry(
+      this.writeSessionState,
+      [
+        ...this.hiddenRecords,
+        ...[...this.agents.values()].map((record) => record.toPersistedRecord()),
+      ],
+      [...this.hiddenTombstones, ...this.tombstones.values()],
+    );
   }
 
   /**
@@ -540,6 +553,9 @@ export class SubagentManager {
     if (this.registryIncompatibility) {
       return { kind: "refused", reason: "incompatible" };
     }
+    if (this.tombstones.has(id)) {
+      return { kind: "refused", reason: "deleted" };
+    }
     const agent = this.agents.get(id);
     if (!agent) return { kind: "refused", reason: "unknown-agent" };
     const refusal = agent.resumeRefusal;
@@ -587,6 +603,12 @@ export class SubagentManager {
    */
   private removeRecord(id: string, record: Subagent): Promise<void> {
     this.agents.delete(id);
+    this.tombstones.set(id, {
+      id,
+      parentEntryId: record.parentEntryId,
+      reason: "deleted",
+      deletedAt: Date.now(),
+    });
     this.persistRegistry();
     return record.disposeSession();
   }
@@ -678,6 +700,8 @@ export class SubagentManager {
     this.limiter.clear();
     const teardowns = [...this.agents.values()].map(record => record.disposeSession());
     this.agents.clear();
+    this.tombstones.clear();
+    this.hiddenTombstones = [];
     await Promise.allSettled(teardowns);
   }
 }

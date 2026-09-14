@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AgentTypeRegistry, BUILTIN_TOOL_NAMES } from "#src/config/agent-types";
 import type { AgentConfig } from "#src/types";
+import * as typesModule from "#src/types";
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -269,10 +270,9 @@ describe("AgentTypeRegistry", () => {
       expect(AgentTypeRegistry.DEFAULT_AGENT_NAMES).toEqual(["general-purpose", "Explore", "Plan"]);
     });
 
-    it("is no longer exported from types.ts", async () => {
+    it("is no longer exported from types.ts", () => {
       // DEFAULT_AGENT_NAMES was moved to AgentTypeRegistry; it must NOT appear
       // as a named export from types.ts anymore.
-      const typesModule = await import("#src/types");
       expect((typesModule as Record<string, unknown>).DEFAULT_AGENT_NAMES).toBeUndefined();
     });
   });
