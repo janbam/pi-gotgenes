@@ -211,6 +211,8 @@ export class Subagent {
 	private _resumeSpec?: PersistedSubagentSession;
 	private _restoreRefusal?: "unavailable" | "incompatible";
 	private restoringSession = false;
+	/** In-flight teardown barrier; same-ID restoration must follow the old disposed event. */
+	private _sessionRelease?: Promise<void>;
 	/** True once releaseSession() has freed a live session (distinct from never having had one). */
 	get sessionReleased(): boolean { return this._sessionReleased; }
 
@@ -544,6 +546,10 @@ export class Subagent {
 		this.restoringSession = true;
 		this._restoreRefusal = undefined;
 		try {
+			// A restored child reuses the persisted session ID, so its registration
+			// must follow the old child's final disposed event.
+			await this._sessionRelease;
+
 			// Restore the exact working directory before reopening the SDK session,
 			// whose persisted resource configuration points at that directory.
 			await this.workspaceBracket.restore({
@@ -773,13 +779,14 @@ export class Subagent {
 	/**
 	 * Release the heavy session while keeping the record: capture the transcript
 	 * pointer, dispose the session (firing `disposed`), clear it, and mark released.
-	 * A no-op once the session is gone — the retention sweep may call it repeatedly.
+	 * Repeated callers join an in-flight teardown, then become no-ops once it settles.
 	 *
 	 * The record's own state is updated before the teardown is awaited, so a sweep
 	 * tick arriving mid-teardown sees a released record rather than starting a
 	 * second one.
 	 */
 	async releaseSession(): Promise<void> {
+		if (this._sessionRelease) return this._sessionRelease;
 		const session = this.subagentSession;
 		if (!session) return;
 		this.suspendHeldWorkspace();
@@ -787,8 +794,15 @@ export class Subagent {
 		this._resumeSpec = session.resumeSpec ?? this._resumeSpec;
 		this.subagentSession = undefined;
 		this._sessionReleased = true;
-		await disposeQuietly(session, "child session release");
-		this.execution.observer?.onStateChanged?.(this);
+		const release = disposeQuietly(session, "child session release").then(() => {
+			this.execution.observer?.onStateChanged?.(this);
+		});
+		this._sessionRelease = release;
+		try {
+			await release;
+		} finally {
+			if (this._sessionRelease === release) this._sessionRelease = undefined;
+		}
 	}
 
 	/** Fail a run: mark error, release listeners, best-effort workspace suspend, notify observer. */

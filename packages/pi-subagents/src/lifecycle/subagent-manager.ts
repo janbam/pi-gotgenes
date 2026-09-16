@@ -756,6 +756,7 @@ export class SubagentManager {
       }),
       execution: {
         createSubagentSession: this.createSubagentSession,
+        restoreSubagentSession: this.restoreSubagentSession,
         snapshot,
         prompt,
         baseCwd: this.baseCwd,
