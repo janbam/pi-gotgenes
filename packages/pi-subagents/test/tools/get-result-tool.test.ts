@@ -356,16 +356,18 @@ describe("GetResultTool — TUI rendering", () => {
 			expect(renderRows(result, true)).toHaveLength(MAX_EXPANDED_LINES + 1);
 		});
 
-		it("spends one row per line whatever the terminal width", async () => {
+		it("wraps a long report line instead of clipping its tail", async () => {
+			const longLine = `${"result ".repeat(20)}tail-marker`;
 			const records = new Map([
-				["agent-1", createTestSubagent({ result: "x".repeat(526) })],
+				["agent-1", createTestSubagent({ result: longLine })],
 			]);
 
 			const result = await execute(makeManager(records), { agent_id: "agent-1" });
+			const rows = renderRows(result, true, 40);
 
-			for (const width of [40, 80, 120]) {
-				expect(renderRows(result, false, width)).toHaveLength(3);
-			}
+			expect(rows.length).toBeGreaterThan(1);
+			expect(rows.join("\n")).toContain("tail-marker");
+			expect(rows.join("\n")).not.toContain("...");
 		});
 
 		it("falls back to the plain message when there is no record to summarise", async () => {

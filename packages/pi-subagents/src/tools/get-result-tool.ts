@@ -11,7 +11,6 @@ import {
 import { type AgentReport, formatAgentReport } from "#src/tools/get-result-report";
 import { formatLifetimeTokens, textResult } from "#src/tools/helpers";
 import type { Subagent } from "#src/types";
-import { BoundedLines } from "#src/ui/bounded-lines";
 import { formatDuration, getDisplayName, type Theme } from "#src/ui/display";
 import { GLYPHS } from "#src/ui/glyphs";
 
@@ -145,7 +144,7 @@ export class GetResultTool {
 					}),
 				),
 			}),
-			// ---- Custom rendering: a bounded, Ctrl+O-expandable retrieval row ----
+			// ---- Custom rendering: a capped, Ctrl+O-expandable retrieval row ----
 
 			renderCall(args: { agent_id: string; wait?: boolean; verbose?: boolean }, theme: Theme) {
 				const notes = [args.wait === true ? "waiting" : "", args.verbose === true ? "verbose" : ""]
@@ -170,7 +169,7 @@ export class GetResultTool {
 				const reportText = result.content[0]?.type === "text" ? result.content[0].text : "";
 				const details = result.details;
 				if (!details) return new Text(reportText, 0, 0);
-				return new BoundedLines(renderGetResultLines(details, reportText, expanded, theme));
+				return new Text(renderGetResultLines(details, reportText, expanded, theme).join("\n"), 0, 0);
 			},
 
 			execute: (

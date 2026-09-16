@@ -2,8 +2,8 @@
  * get-result-renderer.ts — Pure line assembly for the get_subagent_result TUI view.
  *
  * All functions are stateless: they receive GetResultDetails, the report text,
- * and a Theme, returning the pre-themed lines a BoundedLines component spends
- * one terminal row on each. No SDK types, no timers, no side effects.
+ * and a Theme, returning pre-themed logical lines for a wrapping Text component.
+ * No SDK types, no timers, no side effects.
  * Consumed by the renderResult hook in get-result-tool.ts. Mirrors the
  * result-renderer.ts pattern used by the subagent tool's renderer.
  */
@@ -52,7 +52,7 @@ export interface GetResultDetails {
  * The lines for one get_subagent_result row, in its current expansion state.
  *
  * Collapsed is a fixed summary built from `details` alone; expanded is the
- * report text, capped. Neither grows with the size of the result.
+ * report text, capped by logical lines. Long lines wrap to the viewport.
  */
 export function renderGetResultLines(
 	details: GetResultDetails,

@@ -402,7 +402,6 @@ src/
 │   ├── agent-widget.ts             above-editor live status widget
 │   ├── widget-renderer.ts          pure rendering for widget
 │   ├── display.ts                  pure formatters and shared types
-│   ├── bounded-lines.ts            component spending exactly one clipped terminal row per line
 │   ├── glyphs.ts                   semantic display-glyph vocabulary (monospace-coverage constraint, #669)
 │   ├── subagents-settings.ts       /subagents:settings command handler
 │   ├── session-navigation.ts       pure session-selection and transcript-source logic

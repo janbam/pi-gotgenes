@@ -243,15 +243,23 @@ ${guidelines}
 
 			// ---- Custom rendering: inline subagent results ----
 
-			renderCall(args: Record<string, unknown>, theme: Theme) {
+			renderCall(args: Record<string, unknown>, theme: Theme, context) {
 				const displayName = args.subagent_type
 					? getDisplayName(args.subagent_type as string, registry)
 					: "Subagent";
 				const desc = (args.description as string | undefined) ?? "";
-				return new Text(
+				const prompt = (args.prompt as string | undefined) ?? "";
+				let text =
 					`${GLYPHS.toolCall} ` +
-						theme.fg("toolTitle", theme.bold(displayName)) +
-						(desc ? "  " + theme.fg("muted", desc) : ""),
+					theme.fg("toolTitle", theme.bold(displayName)) +
+					(desc ? "  " + theme.fg("muted", desc) : "");
+
+				// Expanded tool rows expose the exact task the child received.
+				if (context.expanded && prompt) {
+					text += "\n" + theme.fg("dim", `  ${GLYPHS.subLine}  ${prompt}`);
+				}
+				return new Text(
+					text,
 					0,
 					0,
 				);
@@ -261,13 +269,17 @@ ${guidelines}
 				result: AgentToolResult<AgentDetails | undefined>,
 				{ expanded, isPartial }: ToolRenderResultOptions,
 				theme: Theme,
+				context,
 			) {
+				const resultText = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+				// Pi owns failures before or around execution, so its error text is more authoritative than placeholder details.
+				if (context.isError) return new Text(resultText, 0, 0);
+
 				const details = result.details;
 				if (!details) {
-					const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-					return new Text(text, 0, 0);
+					return new Text(resultText, 0, 0);
 				}
-				const resultText = result.content[0]?.type === "text" ? result.content[0].text : "";
 				return new Text(
 					renderAgentResult(details, resultText, expanded, isPartial, theme),
 					0,

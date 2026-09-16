@@ -504,3 +504,67 @@ describe("AgentTool — foreground execution", () => {
 		expect(result.content[0].text).toContain("Agent ID: agent-1");
 	});
 });
+
+describe("AgentTool — TUI call rendering", () => {
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	};
+
+	function renderCall(expanded: boolean): string {
+		const deps = createToolDeps();
+		const renderer = makeTool(deps).toToolDefinition().renderCall;
+		if (!renderer) throw new Error("subagent registers no renderCall");
+		return renderer(
+			{
+				prompt: "Inspect the rendering pipeline and report the exact failure.",
+				description: "trace rendering",
+				subagent_type: "general-purpose",
+			},
+			theme as never,
+			{ expanded } as never,
+		)
+			.render(100)
+			.join("\n");
+	}
+
+	it("shows the input prompt when expanded", () => {
+		expect(renderCall(true)).toContain(
+			"Inspect the rendering pipeline and report the exact failure.",
+		);
+	});
+
+	it("keeps the input prompt hidden when collapsed", () => {
+		expect(renderCall(false)).not.toContain(
+			"Inspect the rendering pipeline and report the exact failure.",
+		);
+	});
+});
+
+describe("AgentTool — TUI result rendering", () => {
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	};
+
+	it("shows Pi's validation error when execution never produced agent details", () => {
+		const renderer = makeTool(createToolDeps()).toToolDefinition().renderResult;
+		if (!renderer) throw new Error("subagent registers no renderResult");
+		const validationError =
+			'Validation failed for tool "subagent":\n  - description: must have required properties description';
+
+		// Pi represents pre-execution failures with an empty details object and the error flag in render context.
+		const rendered = renderer(
+			{ content: [{ type: "text", text: validationError }], details: {} as never },
+			{ expanded: false, isPartial: false },
+			theme as never,
+			{ isError: true } as never,
+		)
+			.render(100)
+			.map((line) => line.trimEnd())
+			.join("\n");
+
+		expect(rendered).toContain(validationError);
+		expect(rendered).not.toContain("max turns exceeded");
+	});
+});

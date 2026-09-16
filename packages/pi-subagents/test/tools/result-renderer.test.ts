@@ -275,6 +275,14 @@ describe("renderFailed", () => {
 		);
 	});
 
+	it("shows the actual error when an aborted status carries one", () => {
+		const details = makeDetails({ status: "aborted", error: "503 upstream unavailable" });
+		expect(renderFailed(details, theme)).toContain(
+			"[error:  \u23BF  Error: 503 upstream unavailable]",
+		);
+		expect(renderFailed(details, theme)).not.toContain("max turns exceeded");
+	});
+
 	it("error sub-line includes agent ID when known", () => {
 		const details = makeDetails({ status: "error", error: "Out of context", agentId: "agent-7" });
 		expect(renderFailed(details, theme)).toContain(
@@ -323,6 +331,13 @@ describe("renderAgentResult", () => {
 	it("dispatches to renderStopped for stopped status", () => {
 		const details = makeDetails({ status: "stopped" });
 		expect(renderAgentResult(details, "", false, false, theme)).toContain("[dim:\u25A0]");
+	});
+
+	it("dispatches a preserved terminal status carrying an error to the failure renderer", () => {
+		const details = makeDetails({ status: "stopped", error: "workspace cleanup failed" });
+		expect(renderAgentResult(details, "", false, false, theme)).toContain(
+			"[error:  \u23BF  Error: workspace cleanup failed]",
+		);
 	});
 
 	it("dispatches to renderFailed for error status", () => {
