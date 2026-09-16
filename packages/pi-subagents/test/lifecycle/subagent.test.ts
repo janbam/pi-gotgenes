@@ -550,6 +550,10 @@ describe("Subagent — releaseSession", () => {
 		const first = record.releaseSession();
 		expect(record.isSessionReady()).toBe(false);
 		const second = record.releaseSession();
+		let secondSettled = false;
+		void second.then(() => { secondSettled = true; });
+		await Promise.resolve();
+		expect(secondSettled).toBe(false);
 
 		teardown.resolve();
 		await Promise.all([first, second]);

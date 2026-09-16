@@ -2367,6 +2367,77 @@ describe("SubagentManager", () => {
     });
 
     describe("accepted", () => {
+      it("reopens a freshly spawned session after retention releases it", async () => {
+        const fresh = createSessionFactory(
+          createMockSession(),
+          "/tasks/child.jsonl",
+        );
+        const releaseGate = Promise.withResolvers<void>(); // eslint-disable-line @typescript-eslint/no-invalid-void-type -- Promise.withResolvers<void> is valid; rule does not allow void in generic fn call type args
+        const lifecycleOrder: string[] = [];
+        fresh.stub.dispose.mockImplementation(async () => {
+          await releaseGate.promise;
+          lifecycleOrder.push("old session released");
+        });
+        const restored = createSubagentSessionStub(
+          createMockSession(),
+          "/tasks/child.jsonl",
+        );
+        const restoreSubagentSession = vi.fn(async () => {
+          lifecycleOrder.push("child session restored");
+          return toSubagentSession(restored);
+        });
+        ({ manager } = createManager({
+          createSubagentSession: fresh.factory,
+          restoreSubagentSession,
+          getRetentionPolicy: () => ({
+            consumedSessionRetentionMinutes: 1,
+            unconsumedSessionRetentionMinutes: 1,
+          }),
+        }));
+        const provider = makeWorkspaceProvider(
+          makeWorkspace("/ws/initial"),
+          makeWorkspace("/ws/restored"),
+        );
+        provider.restore.mockImplementation(async () => {
+          lifecycleOrder.push("workspace restored");
+          return makeWorkspace("/ws/restored");
+        });
+        manager.registerWorkspaceProvider(provider);
+        const id = spawnBg(manager);
+        const record = manager.getRecord(id)!;
+        await record.promise;
+
+        // Trigger the timer's fire-and-forget release, then request resume while
+        // the old child is still inside asynchronous session_shutdown handlers.
+        record.markConsumed(record.completedAt);
+        const now = vi.spyOn(Date, "now").mockReturnValue(
+          record.completedAt! + 2 * 60_000,
+        );
+        (manager as any).sweep();
+        now.mockRestore();
+        const pendingResume = manager.resume(id, "continue");
+
+        releaseGate.resolve();
+        const outcome = await pendingResume;
+
+        expect(outcome).toMatchObject({ kind: "resumed", record: { id } });
+        expect(lifecycleOrder).toEqual([
+          "old session released",
+          "workspace restored",
+          "child session restored",
+        ]);
+        expect(provider.restore).toHaveBeenCalledOnce();
+        expect(restoreSubagentSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            spec: expect.objectContaining({ outputFile: "/tasks/child.jsonl" }),
+          }),
+        );
+        expect(restored.resumeTurnLoop).toHaveBeenCalledWith(
+          "continue",
+          undefined,
+        );
+      });
+
       it("returns the resumed record", async () => {
         const { factory, stub } = createSessionFactory();
         stub.resumeTurnLoop.mockResolvedValue("second");
