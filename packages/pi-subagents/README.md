@@ -95,7 +95,7 @@ Individual agent results render inline in the conversation:
 | **Error**      | `✗ ↻3 · 3 tool uses · 12.4k token (8%)` / `⎿ Error: timeout`                             |
 | **Aborted**    | `✗ ↻55≤50 · 55 tool uses · 102.3k token (95% · ⇊3)` / `⎿ Aborted (max turns exceeded)`   |
 
-Completed results can be expanded (ctrl+o in pi) to show the full agent output inline.
+Expanding a `subagent` tool row (ctrl+o in pi) shows both the exact input prompt and the agent output inline.
 
 Background agent completion notifications render as styled boxes:
 
@@ -140,7 +140,7 @@ Check status and retrieve results from a background agent.
 | `verbose`  | boolean | no       | Include full conversation log |
 
 The result renders as a compact three-line summary — status, stats, description, and a one-line preview.
-Press `Ctrl+O` to expand it to the full report, bounded so a long result cannot fill the terminal; the expanded view names the transcript path when it withholds anything.
+Press `Ctrl+O` to expand it to the first 50 logical report lines; long lines wrap to the terminal width instead of being clipped, and the expanded view names the transcript path when it withholds anything.
 The complete report, including the conversation `verbose` requests, always reaches the model regardless of what the terminal shows.
 
 ### `steer_subagent`

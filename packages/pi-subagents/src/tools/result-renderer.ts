@@ -23,6 +23,8 @@ export function renderAgentResult(
 ): string {
 	if (isPartial || details.status === "running") return renderRunning(details, theme);
 	if (details.status === "background") return renderBackground(details, theme);
+	// A concrete failure outranks a preserved lifecycle status such as stopped.
+	if (details.error != null) return renderFailed(details, theme);
 	if (details.status === "completed" || details.status === "steered")
 		return renderCompleted(details, resultText, expanded, theme);
 	if (details.status === "stopped") return renderStopped(details, theme);
@@ -89,12 +91,13 @@ export function renderStopped(details: AgentDetails, theme: Theme): string {
 	return line;
 }
 
-/** Render error or aborted status: error icon + stats + status message. */
+/** Render a concrete failure or hard turn-limit abort with its most specific message. */
 export function renderFailed(details: AgentDetails, theme: Theme): string {
 	const s = renderStats(details, theme);
-	let line = renderStatusIcon(details.status === "error" ? "error" : "aborted", theme) + (s ? " " + s : "");
+	const hasError = details.error != null || details.status === "error";
+	let line = renderStatusIcon(hasError ? "error" : "aborted", theme) + (s ? " " + s : "");
 
-	if (details.status === "error") {
+	if (hasError) {
 		line +=
 			"\n" +
 			theme.fg("error", `  ${GLYPHS.subLine}  Error: ${details.error ?? "unknown"}${idSuffix(details)}`);
