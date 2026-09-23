@@ -31,6 +31,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * reconcile fork with upstream main ([49c854c](https://github.com/gotgenes/pi-packages/commit/49c854cffc9d6f9a7721c73ffaa6bcc52c031b4e))
 
+## [21.7.6](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.7.5...pi-subagents-v21.7.6) (2026-09-22)
+
+
+### Documentation
+
+* snapshot fallow vital signs per package and trend them at phase close ([bc8bbc3](https://github.com/gotgenes/pi-packages/commit/bc8bbc34e32f30c99260aaa05a044df3f445857a)), closes [#966](https://github.com/gotgenes/pi-packages/issues/966)
+
+## [21.7.5](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.7.4...pi-subagents-v21.7.5) (2026-09-21)
+
+
+### Bug Fixes
+
+* **pi-subagents:** keep the agents widget inside the terminal viewport ([123c7f9](https://github.com/gotgenes/pi-packages/commit/123c7f9dd387a658979b3af587163dcdc7fe5a1c)), closes [#864](https://github.com/gotgenes/pi-packages/issues/864)
+* **pi-subagents:** stop widget animation while no subagent is running ([fe6269a](https://github.com/gotgenes/pi-packages/commit/fe6269ab11a3f93fcaa5084c15067051f7b11628)), closes [#864](https://github.com/gotgenes/pi-packages/issues/864)
+* **pi-subagents:** count hidden queued agents in the widget overflow summary ([c2b78e3](https://github.com/gotgenes/pi-packages/commit/c2b78e3ea26a091eeb832b02c5256b08d333cfe3)), closes [#864](https://github.com/gotgenes/pi-packages/issues/864)
+
+### Performance Improvements
+
+* **pi-subagents:** slow the agents widget animation to 250 ms ([2eb6292](https://github.com/gotgenes/pi-packages/commit/2eb62924f6f0a86165497df1aca4d84a9b78a72b)), closes [#864](https://github.com/gotgenes/pi-packages/issues/864)
+
+### Documentation
+
+* **pi-subagents:** record the widget's viewport bound and 250 ms cadence ([6f863da](https://github.com/gotgenes/pi-packages/commit/6f863da50e96ccda0231fb448a24815365023083)), closes [#864](https://github.com/gotgenes/pi-packages/issues/864)
+
+## [21.7.4](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.7.3...pi-subagents-v21.7.4) (2026-09-20)
+
+
+### Bug Fixes
+
+* **pi-subagents:** recognize pi ≥0.86's section-shaped prompt in the tail anchors ([b580282](https://github.com/gotgenes/pi-packages/commit/b580282588476c2e74e3771ada47cb73186af0fa)), closes [#958](https://github.com/gotgenes/pi-packages/issues/958)
+
+### Documentation
+
+* **pi-subagents:** record when the 0.85 project-context offset goes dead ([bdc32f5](https://github.com/gotgenes/pi-packages/commit/bdc32f5704c07a363a617aed29ed6efc01219c63)), closes [#959](https://github.com/gotgenes/pi-packages/issues/959)
+
+## [21.7.3](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.7.2...pi-subagents-v21.7.3) (2026-09-18)
+
+
+### Bug Fixes
+
+* **pi-subagents:** cancel an in-flight resume when the agent is aborted ([acd83b0](https://github.com/gotgenes/pi-packages/commit/acd83b0059e3f196ebd4b0664dae9614b20dfbed)), closes [#913](https://github.com/gotgenes/pi-packages/issues/913)
+
+### Documentation
+
+* **pi-subagents:** record the resume abort lever in the README and roadmap ([5b942e9](https://github.com/gotgenes/pi-packages/commit/5b942e94fed972d3403ca0dabb856866d4a1b667)), closes [#913](https://github.com/gotgenes/pi-packages/issues/913)
+
+## [21.7.2](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.7.1...pi-subagents-v21.7.2) (2026-09-18)
+
+
+### Bug Fixes
+
+* **pi-subagents:** stop the fallback prompt claiming tools the child may not hold ([661e7f3](https://github.com/gotgenes/pi-packages/commit/661e7f3da8e62bdc3d277abcc28ff82e59b72b07)), closes [#904](https://github.com/gotgenes/pi-packages/issues/904)
+
+## [21.7.1](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.7.0...pi-subagents-v21.7.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **pi-subagents:** stop a relocated child inheriting its parent's project-context paths ([3deb50c](https://github.com/gotgenes/pi-packages/commit/3deb50c6dcef0b5fa84de7f955765baf92297921)), closes [#918](https://github.com/gotgenes/pi-packages/issues/918)
+* **pi-subagents:** give a relocated child its own project instructions ([c69f99a](https://github.com/gotgenes/pi-packages/commit/c69f99ad92db3f6449ebde1bc1c7ba1b298951d1)), closes [#918](https://github.com/gotgenes/pi-packages/issues/918)
+* **pi-subagents:** resolve a portable child's project context against its own directory ([7f8baaf](https://github.com/gotgenes/pi-packages/commit/7f8baaf061cad16d1820892a117960f08040408f)), closes [#918](https://github.com/gotgenes/pi-packages/issues/918)
+
+### Documentation
+
+* **pi-subagents:** record project context as a directory-resolved layer ([95aeb69](https://github.com/gotgenes/pi-packages/commit/95aeb695a1e04e1812f45821d377642795891438)), closes [#918](https://github.com/gotgenes/pi-packages/issues/918)
+
 ## [21.7.0](https://github.com/gotgenes/pi-packages/compare/pi-subagents-v21.6.0...pi-subagents-v21.7.0) (2026-09-11)
 
 

@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { AgentTypeRegistry } from "#src/config/agent-types";
 import type { Theme } from "#src/ui/display";
 import type { WidgetAgent } from "#src/ui/widget-renderer";
-import { renderFinishedLine, renderRunningLines, renderWidgetLines } from "#src/ui/widget-renderer";
+import {
+	renderFinishedLine,
+	renderRunningLines,
+	renderWidgetLines,
+	widgetLineBudget,
+} from "#src/ui/widget-renderer";
 
 /** Minimal theme stub — wraps text with markup tags for assertion. */
 function stubTheme(): Theme {
@@ -32,6 +37,25 @@ function makeAgent(overrides: Partial<WidgetAgent> = {}): WidgetAgent {
 		contextPercent: null,
 		...overrides,
 	};
+}
+
+type RenderWidgetLinesParams = Parameters<typeof renderWidgetLines>[0];
+
+/**
+ * Call `renderWidgetLines` with the defaults every case shares, overriding only
+ * what the case is about. One place to teach a new parameter.
+ */
+function callRenderWidgetLines(overrides: Partial<RenderWidgetLinesParams> = {}): string[] {
+	return renderWidgetLines({
+		agents: [],
+		registry: testRegistry,
+		spinnerFrame: 0,
+		terminalWidth: 200,
+		terminalHeight: 40,
+		theme: stubTheme(),
+		shouldShowFinished: () => true,
+		...overrides,
+	});
 }
 
 describe("renderFinishedLine", () => {
@@ -214,20 +238,32 @@ describe("renderRunningLines", () => {
 	});
 });
 
+describe("widgetLineBudget", () => {
+	// Pi's differential renderer full-clears the screen when the first changed
+	// line sits above the viewport, so the widget's own height has to leave the
+	// dock below it room inside the terminal (#864).
+	it.each([
+		{ rows: 6, budget: 3 },
+		{ rows: 7, budget: 3 },
+		{ rows: 9, budget: 3 },
+		{ rows: 10, budget: 4 },
+		{ rows: 12, budget: 6 },
+		{ rows: 14, budget: 8 },
+		{ rows: 16, budget: 10 },
+		{ rows: 18, budget: 12 },
+		{ rows: 24, budget: 12 },
+		{ rows: 60, budget: 12 },
+	])("allows $budget lines in a $rows-row terminal", ({ rows, budget }) => {
+		expect(widgetLineBudget(rows)).toBe(budget);
+	});
+});
+
 describe("renderWidgetLines", () => {
-	const theme = stubTheme();
 
 	it("renders a single running agent with heading and tree connectors", () => {
 		const agent = makeAgent({ status: "running", completedAt: undefined, turnCount: 1 });
 
-		const lines = renderWidgetLines({
-			agents: [agent],
-			registry: testRegistry,
-			spinnerFrame: 0,
-			terminalWidth: 200,
-			theme,
-			shouldShowFinished: () => true,
-		});
+		const lines = callRenderWidgetLines({ agents: [agent] });
 
 		// Heading with active indicator
 		expect(lines[0]).toContain("●");
@@ -247,14 +283,7 @@ describe("renderWidgetLines", () => {
 		const finished = makeAgent({ id: "f1", status: "completed", completedAt: 6000, turnCount: 5 });
 		const queued = makeAgent({ id: "q1", status: "queued", completedAt: undefined });
 
-		const lines = renderWidgetLines({
-			agents: [running, finished, queued],
-			registry: testRegistry,
-			spinnerFrame: 0,
-			terminalWidth: 200,
-			theme,
-			shouldShowFinished: () => true,
-		});
+		const lines = callRenderWidgetLines({ agents: [running, finished, queued] });
 
 		// Heading (active because running+queued exist)
 		expect(lines[0]).toContain("[accent:\u25cf]");
@@ -275,12 +304,8 @@ describe("renderWidgetLines", () => {
 		const finished1 = makeAgent({ id: "f1", status: "completed", completedAt: 6000 });
 		const finished2 = makeAgent({ id: "f2", status: "error", completedAt: 6000 });
 
-		const lines = renderWidgetLines({
+		const lines = callRenderWidgetLines({
 			agents: [finished1, finished2],
-			registry: testRegistry,
-			spinnerFrame: 0,
-			terminalWidth: 200,
-			theme,
 			// Only show f1, filter out f2
 			shouldShowFinished: (id) => id === "f1",
 		});
@@ -303,14 +328,7 @@ describe("renderWidgetLines", () => {
 		// Add a finished agent — should be hidden since running takes priority
 		agents.push(makeAgent({ id: "f1", status: "completed", completedAt: 6000 }));
 
-		const lines = renderWidgetLines({
-			agents,
-			registry: testRegistry,
-			spinnerFrame: 0,
-			terminalWidth: 200,
-			theme,
-			shouldShowFinished: () => true,
-		});
+		const lines = callRenderWidgetLines({ agents });
 
 		// heading(1) + 5 running*2(10) + overflow(1) = 12
 		expect(lines).toHaveLength(12);
@@ -321,15 +339,59 @@ describe("renderWidgetLines", () => {
 		expect(lastLine).toContain("1 finished");
 	});
 
-	it("returns empty array when no agents to show", () => {
-		const lines = renderWidgetLines({
-			agents: [],
-			registry: testRegistry,
-			spinnerFrame: 0,
-			terminalWidth: 200,
-			theme,
-			shouldShowFinished: () => true,
+	it("collapses to the overflow summary when the terminal is too short", () => {
+		// 6 running agents = 12 body lines. A 14-row terminal budgets 8 lines,
+		// so maxBody is 7 and the overflow summary takes one of them: 3 pairs fit.
+		const agents: WidgetAgent[] = [];
+		for (let i = 0; i < 6; i++) {
+			agents.push(makeAgent({ id: `r${i}`, status: "running", completedAt: undefined }));
+		}
+
+		const lines = callRenderWidgetLines({ agents, terminalHeight: 14 });
+
+		// heading(1) + 3 running*2(6) + overflow(1) = 8
+		expect(lines).toHaveLength(8);
+		expect(lines[lines.length - 1]).toContain("+3 more");
+		expect(lines[lines.length - 1]).toContain("3 running");
+	});
+
+	it("counts a dropped queued line in the overflow summary", () => {
+		// A 10-row terminal budgets 4 lines, so maxBody is 3 and the running pair
+		// plus the summary consume all of it: the queued line does not fit.
+		const lines = callRenderWidgetLines({
+			agents: [
+				makeAgent({ id: "r1", status: "running", completedAt: undefined }),
+				makeAgent({ id: "q1", status: "queued", completedAt: undefined }),
+				makeAgent({ id: "f1", status: "completed", completedAt: 6000 }),
+			],
+			terminalHeight: 10,
 		});
+
+		expect(lines).toHaveLength(4);
+		const summary = lines[lines.length - 1];
+		expect(summary).toContain("+2 more");
+		expect(summary).toContain("1 queued");
+		expect(summary).toContain("1 finished");
+	});
+
+	it("counts every agent behind a dropped queued line, not the line", () => {
+		const agents: WidgetAgent[] = [makeAgent({ id: "r1", status: "running", completedAt: undefined })];
+		for (let i = 0; i < 3; i++) {
+			agents.push(makeAgent({ id: `q${i}`, status: "queued", completedAt: undefined }));
+		}
+		agents.push(makeAgent({ id: "f1", status: "completed", completedAt: 6000 }));
+
+		const lines = callRenderWidgetLines({ agents, terminalHeight: 10 });
+
+		// The collapsed queued line stands for three agents, so hiding it hides three.
+		const summary = lines[lines.length - 1];
+		expect(summary).toContain("+4 more");
+		expect(summary).toContain("3 queued");
+		expect(summary).toContain("1 finished");
+	});
+
+	it("returns empty array when no agents to show", () => {
+		const lines = callRenderWidgetLines();
 
 		expect(lines).toEqual([]);
 	});
@@ -337,14 +399,7 @@ describe("renderWidgetLines", () => {
 	it("returns empty when all finished agents are filtered out", () => {
 		const agent = makeAgent({ status: "completed", completedAt: 6000 });
 
-		const lines = renderWidgetLines({
-			agents: [agent],
-			registry: testRegistry,
-			spinnerFrame: 0,
-			terminalWidth: 200,
-			theme,
-			shouldShowFinished: () => false,
-		});
+		const lines = callRenderWidgetLines({ agents: [agent], shouldShowFinished: () => false });
 
 		expect(lines).toEqual([]);
 	});
@@ -352,14 +407,7 @@ describe("renderWidgetLines", () => {
 	it("uses dim heading when only finished agents are visible", () => {
 		const agent = makeAgent({ status: "completed", completedAt: 6000 });
 
-		const lines = renderWidgetLines({
-			agents: [agent],
-			registry: testRegistry,
-			spinnerFrame: 0,
-			terminalWidth: 200,
-			theme,
-			shouldShowFinished: () => true,
-		});
+		const lines = callRenderWidgetLines({ agents: [agent] });
 
 		// Dim heading with open circle
 		expect(lines[0]).toContain("[dim:\u25cb]");

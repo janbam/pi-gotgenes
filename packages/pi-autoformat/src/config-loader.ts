@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { BUILTIN_FORMATTERS } from "./builtin-formatters";
@@ -57,10 +56,6 @@ export type LoadConfigResult = {
   projectConfigPath: string;
   issues: ConfigValidationIssue[];
 };
-
-function defaultAgentDir(): string {
-  return join(homedir(), ".pi", "agent");
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1209,7 +1204,7 @@ function mergeShellMutationDetection(
   };
 }
 
-export function getGlobalConfigPath(agentDir = defaultAgentDir()): string {
+export function getGlobalConfigPath(agentDir: string): string {
   return join(
     agentDir,
     "extensions",
@@ -1228,12 +1223,11 @@ export function getProjectConfigPath(cwd: string): string {
   );
 }
 
-export function loadAutoformatConfig(options?: {
-  cwd?: string;
-  agentDir?: string;
+export function loadAutoformatConfig(options: {
+  cwd: string;
+  agentDir: string;
 }): LoadConfigResult {
-  const cwd = options?.cwd ?? process.cwd();
-  const agentDir = options?.agentDir ?? defaultAgentDir();
+  const { cwd, agentDir } = options;
   const globalConfigPath = getGlobalConfigPath(agentDir);
   const projectConfigPath = getProjectConfigPath(cwd);
   const issues: ConfigValidationIssue[] = [];

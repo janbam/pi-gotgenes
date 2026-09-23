@@ -86,7 +86,7 @@ For everything else — formatter chains and fallback groups, wildcard chains, b
 
 Config files live at two levels, merged with project overriding global:
 
-1. global: `~/.pi/agent/extensions/pi-autoformat/config.json`
+1. global: `~/.pi/agent/extensions/pi-autoformat/config.json` (respects `PI_CODING_AGENT_DIR`)
 2. project: `.pi/extensions/pi-autoformat/config.json`
 
 The only required fields are the `formatters` you declare and the `chains` that map file extensions to them.

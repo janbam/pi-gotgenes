@@ -1,6 +1,6 @@
 ---
 description: Sweep open issues and PRs repo-wide, verify their real state, and produce a prioritized working list
-model: anthropic/claude-opus-5
+model: anthropic/claude-opus-5-5
 ---
 
 # Triage the backlog
@@ -39,6 +39,7 @@ Call `set_session_name` with `Backlog triage — <YYYY-MM-DD>` (append `(<pkg>)`
 - `github-voice` — required before drafting any contributor-facing text.
 - `markdown-conventions` — for the output document.
 - `package-<PKG>` — for each package with items in scope; load the one for `$1` when filtered.
+- `reading-artifacts` — before citing a plan, ADR, PR status, or third-party report in a verdict.
 
 ## Step 1: Read the prior triage and decision artifacts
 
@@ -79,13 +80,19 @@ gh pr list --state open --limit 200 --json number,title,author,createdAt,updated
 
 Filter by the `pkg:$1` label (issues) and changed paths (PRs) when `$1` is set.
 
-For every open PR, resolve its **real** state one at a time — a list query returns `UNKNOWN` for `mergeable` because GitHub computes it lazily:
+For every open PR, resolve its **real** state:
 
 ```bash
-gh pr view <N> --json number,author,mergeable,mergeStateStatus,additions,deletions,changedFiles,statusCheckRollup
+gh pr view <N> --json number,author,headRefOid,mergeable,mergeStateStatus,additions,deletions,changedFiles,statusCheckRollup
 ```
 
+The first call only *triggers* GitHub's merge computation — `mergeable` returns `UNKNOWN` from a single-PR query too, not just from a list query.
+Query every PR once, then re-query the ones still `UNKNOWN` a few seconds later.
+
+A scope verdict is a verdict about a diff, not about a number: inherit a PR's prior verdict only when its head SHA is unchanged, and re-derive it when the head moved.
+
 Also record, for each item: the author, whether they are a third party (compare to `gh api user --jq .login`), the age since creation, and the age since the **last maintainer response**.
+Compute every age with `date`, never by hand: `echo $(( ( $(date -u +%s) - $(date -u -d <createdAt> +%s) ) / 86400 ))`.
 
 ## Step 3: Establish real CI state (do not infer it)
 
@@ -103,8 +110,9 @@ Approving a run executes contributor code in CI, so confirm the privileged jobs 
 
 1. Does the PR touch `.github/`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `mise.toml`, `.npmrc`, `patches/`, or `scripts/`?
    Any hit means read the diff before going further — those are the CI and install-script surfaces.
-2. Are the secret-bearing and OIDC jobs unreachable from a pull request?
-   They all live in `release.yml`, whose only trigger is `workflow_dispatch` — `prepare` holds `RELEASE_PLEASE_TOKEN` and `contents: write`, and `publish` holds `id-token: write` for npm Trusted Publishing.
+2. Are the privileged and OIDC jobs unreachable from a pull request?
+   They all live in `release.yml`, whose only trigger is `workflow_dispatch` — `prepare` and `github-release` hold `contents: write`, and `publish` holds `id-token: write` for npm Trusted Publishing.
+   The release pipeline holds no PAT: every job uses the default `GITHUB_TOKEN`, so the escalation surface is the workflow's own permissions rather than a long-lived secret.
    Verify that trigger rather than assuming it, since a `pull_request` trigger added there would expose all three.
 3. Are there `pull_request_target`, `workflow_run`, or `issue_comment` triggers?
    Those run in a privileged context; their absence is what makes fork approval routine.
@@ -116,6 +124,9 @@ Approve only after it passes:
 ```bash
 gh api -X POST repos/gotgenes/pi-packages/actions/runs/<id>/approve
 ```
+
+Approval does not gate every fork run: some contributors' pushes execute CI on arrival, and the repository's fork-approval setting is not readable through the API.
+The audit gates the runs you approve — it is not evidence that all contributor code waited for one.
 
 ## Step 4: Interpret failures before ranking them
 
@@ -279,7 +290,7 @@ The document contains:
    | ---- | ------------ | ------------ | ------------------------------------------------------------------ |
    | #740 | pi-subagents | out of scope | Non-goal: *A global run-mode default* — run mode is per-invocation |
 
-   Follow it with the recommended disposition for each `out of scope` item (close as not-planned citing the non-goal, or redirect), and a **Carried forward** subsection recording the verdicts inherited from the prior run and the outcome of any re-check.
+   Follow it with the recommended disposition for each `out of scope` item (close as not-planned citing the non-goal, or redirect), and a **Carried forward** subsection recording the verdicts inherited from the prior run, the head SHA each PR verdict was taken against, and the outcome of any re-check.
 3. **The prioritized table** — the deliverable, carrying only `aligned`, `adjacent`, and `no charter` items:
 
    | Rank | Item | Kind         | Severity | Why now                              |

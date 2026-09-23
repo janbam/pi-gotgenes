@@ -532,13 +532,13 @@ describe("createSubagentSession — prompt inheritance", () => {
 
     await createSubagentSession(
       {
-        snapshot: { ...STUB_SNAPSHOT, portablePrompt: "<project_context>…</project_context>" },
+        snapshot: { ...STUB_SNAPSHOT, portablePrompt: "You are a specialist." },
         type: "Explore",
       },
       defaultDeps(),
     );
 
-    expect(inheritedArgument()?.portablePrompt).toBe("<project_context>…</project_context>");
+    expect(inheritedArgument()?.portablePrompt).toBe("You are a specialist.");
   });
 
   it("applies the strategy the deps' resolver returns", async () => {

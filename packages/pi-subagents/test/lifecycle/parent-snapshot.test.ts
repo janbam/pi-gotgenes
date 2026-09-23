@@ -9,7 +9,10 @@ vi.mock("#src/session/context", () => ({
 }));
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { buildParentSnapshot } from "#src/lifecycle/parent-snapshot";
+import {
+  buildParentSnapshot,
+  type ParentPromptOptions,
+} from "#src/lifecycle/parent-snapshot";
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
   return {
@@ -76,60 +79,31 @@ describe("buildParentSnapshot", () => {
     });
 
     it("is undefined when the captured options carry no operator-authored parts", () => {
-      const snapshot = buildParentSnapshot(makeCtx(), false, { contextFiles: [] });
+      const snapshot = buildParentSnapshot(makeCtx(), false, {});
       expect(snapshot.portablePrompt).toBeUndefined();
     });
 
-    it("renders context files the way Pi's buildSystemPrompt does", () => {
-      // Byte-exact against core/system-prompt.ts, which writes the lead-in
-      // sentence and separates each block with a blank line.
-      const snapshot = buildParentSnapshot(makeCtx(), false, {
-        contextFiles: [
-          { path: "/repo/AGENTS.md", content: "Repo rules." },
-          { path: "/repo/sub/AGENTS.md", content: "Nested rules." },
-        ],
-      });
-      expect(snapshot.portablePrompt).toBe(
-        [
-          "<project_context>",
-          "",
-          "Project-specific instructions and guidelines:",
-          "",
-          '<project_instructions path="/repo/AGENTS.md">',
-          "Repo rules.",
-          "</project_instructions>",
-          "",
-          '<project_instructions path="/repo/sub/AGENTS.md">',
-          "Nested rules.",
-          "</project_instructions>",
-          "",
-          "</project_context>",
-        ].join("\n"),
-      );
+    it("carries no project context, which each child resolves for itself", () => {
+      // The block names context files by absolute path, so the parent's copy
+      // would tell a relocated child its files live in the parent's checkout.
+      // Pi's payload still carries them at runtime, which the cast reproduces.
+      const captured = {
+        customPrompt: "You are a specialist.",
+        contextFiles: [{ path: "/repo/AGENTS.md", content: "Repo rules." }],
+      } as ParentPromptOptions;
+
+      const snapshot = buildParentSnapshot(makeCtx(), false, captured);
+
+      expect(snapshot.portablePrompt).toBe("You are a specialist.");
     });
 
-    it("orders the parts the way Pi composes them: custom, append, then context", () => {
+    it("orders the parts the way Pi composes them: custom, then append", () => {
       const snapshot = buildParentSnapshot(makeCtx(), false, {
-        contextFiles: [{ path: "/repo/AGENTS.md", content: "Repo rules." }],
         customPrompt: "You are a specialist.",
         appendSystemPrompt: "Extra instructions.",
       });
       expect(snapshot.portablePrompt).toBe(
-        [
-          "You are a specialist.",
-          "",
-          "Extra instructions.",
-          "",
-          "<project_context>",
-          "",
-          "Project-specific instructions and guidelines:",
-          "",
-          '<project_instructions path="/repo/AGENTS.md">',
-          "Repo rules.",
-          "</project_instructions>",
-          "",
-          "</project_context>",
-        ].join("\n"),
+        ["You are a specialist.", "", "Extra instructions."].join("\n"),
       );
     });
 

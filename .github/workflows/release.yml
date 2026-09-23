@@ -40,10 +40,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: main
-          # Prefer the historical PAT so the release push starts ordinary CI.
-          # Forks without that secret still release through this job's scoped
-          # contents:write token; downstream jobs verify the exact pushed SHA.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          # Pushes the release commit and tags with the default GITHUB_TOKEN,
+          # which the job's `contents: write` covers. `main` has no branch
+          # protection and the repo has no rulesets, so nothing needs a PAT to
+          # bypass. The retired release-please job used one to make CI run on
+          # its release *PR* — a push made with GITHUB_TOKEN triggers no
+          # workflow — and that reason retired with it (Refs #928). The residual
+          # is that the release commit itself gets no CI run; it carries only a
+          # version field and a CHANGELOG entry, over a tree already verified
+          # green at the pre-release SHA.
           # Full history and tags: git-cliff derives every version and changelog
           # from them, and a shallow clone would silently produce wrong versions.
           fetch-depth: 0

@@ -1,28 +1,7 @@
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import sessionTools from "#src/index";
-
-function captureTools(factory: (pi: ExtensionAPI) => void) {
-  const tools = new Map<
-    string,
-    { execute: (...args: unknown[]) => Promise<unknown> }
-  >();
-  const pi = {
-    registerTool: vi.fn(
-      (tool: {
-        name: string;
-        execute: (...args: unknown[]) => Promise<unknown>;
-      }) => {
-        tools.set(tool.name, tool);
-      },
-    ),
-  } as unknown as ExtensionAPI;
-  factory(pi);
-  return tools;
-}
+import { captureTools } from "#test/helpers/capture-tools";
 
 function makeCtx(sessionFile: string | undefined): ExtensionContext {
   return {
@@ -175,6 +154,56 @@ describe("read_parent_session tool", () => {
     );
   });
 
+  describe("window bounds", () => {
+    function threeTurnParent() {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(
+        [1, 2, 3]
+          .map((n) =>
+            JSON.stringify({
+              type: "message",
+              id: String(n),
+              parentId: n === 1 ? null : String(n - 1),
+              timestamp: `t${n}`,
+              message: { role: "user", content: `turn ${n}`, timestamp: n },
+            }),
+          )
+          .join("\n"),
+      );
+      return makeCtx("/sessions/parent/tasks/child.jsonl");
+    }
+
+    it("skips the most recent offset entries of the parent session", async () => {
+      const tools = captureTools(sessionTools);
+      const tool = tools.get("read_parent_session")!;
+
+      const result = await tool.execute(
+        "tc1",
+        { offset: 2, limit: 1 },
+        undefined,
+        undefined,
+        threeTurnParent(),
+      );
+      const text = (result as { content: { text: string }[] }).content[0].text;
+      expect(text).toBe("1. user\nturn 1");
+    });
+
+    it("elides parent user bodies when asked", async () => {
+      const tools = captureTools(sessionTools);
+      const tool = tools.get("read_parent_session")!;
+
+      const result = await tool.execute(
+        "tc1",
+        { offset: 2, limit: 1, elide_user_text: true },
+        undefined,
+        undefined,
+        threeTurnParent(),
+      );
+      const text = (result as { content: { text: string }[] }).content[0].text;
+      expect(text).toBe("1. user\n[text elided: 6 chars]");
+    });
+  });
+
   describe("details", () => {
     it("returns status details when not in a subagent context", async () => {
       const tools = captureTools(sessionTools);
@@ -275,4 +304,51 @@ describe("read_parent_session tool", () => {
       });
     });
   }); // describe("details")
+
+  describe("branches", () => {
+    it("follows the parent session's live path by default", async () => {
+      const tool = captureTools(sessionTools).get("read_parent_session")!;
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(
+        [
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "s1",
+            timestamp: "t0",
+            cwd: "/project",
+          }),
+          ...[
+            ["1", null, "first"],
+            ["2", "1", "retracted"],
+            ["3", "1", "kept"],
+          ].map(([id, parentId, body]) =>
+            JSON.stringify({
+              type: "message",
+              id,
+              parentId,
+              timestamp: `t${id}`,
+              message: { role: "user", content: body, timestamp: 1 },
+            }),
+          ),
+        ].join("\n"),
+      );
+
+      const ctx = makeCtx(
+        "/sessions/--project--/2026-05-20T12-00-00Z_/tasks/child.jsonl",
+      );
+      const result = (await tool.execute(
+        "tc1",
+        {},
+        undefined,
+        undefined,
+        ctx,
+      )) as { content: { text: string }[] };
+      expect(result.content[0].text).toBe(
+        "1. user\nfirst\n\n---\n\n" +
+          '[abandoned branch] 1 entry omitted (branches: "all" to include)\n\n---\n\n' +
+          "2. user\nkept",
+      );
+    });
+  });
 });

@@ -19,6 +19,7 @@ import { LocalUserAuthorizer } from "#src/authority/local-user-authorizer";
 import type { PermissionPromptDecision } from "#src/authority/permission-dialog";
 import type { PromptPermissionDetails } from "#src/authority/permission-prompter";
 import {
+  makeChainAudit,
   makeAuthorizerSelectionDeps as makeDeps,
   makeDetection,
   makeInvokingPrompter,
@@ -247,13 +248,13 @@ describe("AuthorizerSelection", () => {
         kind: "deny",
         reason: "present-decided",
       });
-      const logger = makeAuthorizerLog();
+      const chainAudit = makeChainAudit();
       const selection = new AuthorizerSelection(
         makeDeps({
           prompter: makeInvokingPrompter(),
           authorizerRegistry: registry,
           getAuthorizerChain: () => ["missing", "present"],
-          logger,
+          chainAudit,
         }),
       );
       selection.activate(makeCtx({ hasUI: true }));
@@ -273,10 +274,33 @@ describe("AuthorizerSelection", () => {
           reason: "present-decided",
         },
       });
-      expect(logger.review).toHaveBeenCalledWith(
-        "authorizer_chain_unregistered_link",
-        { requestId: "req-1", name: "missing" },
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenCalledOnce();
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenCalledWith({
+        requestId: "req-1",
+        name: "missing",
+      });
+    });
+
+    it("hands the audit every skip, so its record stays per ask", async () => {
+      const chainAudit = makeChainAudit();
+      const selection = new AuthorizerSelection(
+        makeDeps({
+          getAuthorizerChain: () => ["missing"],
+          chainAudit,
+        }),
       );
+      selection.activate(makeCtx({ hasUI: true }));
+
+      await selection.escalate(makeDetails({ requestId: "req-a" }));
+      await selection.escalate(makeDetails({ requestId: "req-b" }));
+
+      // The selection relays every skip; latching the *warning* is the audit's
+      // job, and the review stream stays complete because this does not latch.
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenCalledTimes(2);
+      expect(chainAudit.auditUnregisteredLink).toHaveBeenLastCalledWith({
+        requestId: "req-b",
+        name: "missing",
+      });
     });
 
     it("records the resolved link names on the ask", async () => {
@@ -522,20 +546,18 @@ describe("AuthorizerSelection", () => {
     });
 
     it("does not report an unregistrable link as an unregistered one", async () => {
-      const logger = makeAuthorizerLog();
+      const chainAudit = makeChainAudit();
       const selection = makeRelayingSelection({
         getAuthorizerChain: () => ["model-judge"],
-        logger,
+        chainAudit,
       });
 
       await selection.escalate(makeDetailsOn("bash"));
 
       // A child cannot host a link at all (#699), so its absence is the design,
       // not the misconfiguration `authorizer_chain_unregistered_link` reports.
-      expect(logger.review).not.toHaveBeenCalledWith(
-        "authorizer_chain_unregistered_link",
-        expect.anything(),
-      );
+      // The audit is never reached, so no warning can escape here either.
+      expect(chainAudit.auditUnregisteredLink).not.toHaveBeenCalled();
     });
 
     it("records nothing when no chain is configured", async () => {

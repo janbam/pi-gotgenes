@@ -74,7 +74,7 @@ export type ResumeOutcome =
 
 /** Per-call knobs for a resume; both doors pass their own. */
 export interface ResumeCallOptions {
-  /** Cancels the resumed turn loop. A resume does not run under the record's own controller. */
+  /** Cancels the resumed turn loop, through the record's own lever — so it ends like `abort(id)` does. */
   signal?: AbortSignal;
   /**
    * The caller will deliver this outcome to the parent, so nothing announces

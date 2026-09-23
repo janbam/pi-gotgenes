@@ -12,8 +12,8 @@
     "check": "pnpm -r run check",
     "test": "pnpm -r run test && vitest run",
     "test:scripts": "vitest run",
-    "lint": "biome check . && eslint packages/ && rumdl check .",
-    "lint:fix": "biome check --write . && eslint packages/ --fix && rumdl fmt .",
+    "lint": "biome check . && eslint packages/ && rumdl check . && node scripts/lint/invisible-characters.mjs",
+    "lint:fix": "biome check --write . && eslint packages/ --fix && rumdl fmt . && node scripts/lint/invisible-characters.mjs --fix",
     "format": "biome format --write .",
     "fallow": "fallow",
     "fallow:audit": "fallow audit",
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
+    "@vitest/coverage-istanbul": "catalog:",
     "eslint": "catalog:",
     "fallow": "catalog:",
     "globals": "catalog:",

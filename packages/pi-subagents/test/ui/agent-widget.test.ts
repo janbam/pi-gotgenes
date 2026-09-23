@@ -20,6 +20,19 @@ function makeAgent(overrides: { id?: string; status?: string; completedAt?: numb
 const alwaysShow = () => true;
 const neverShow = () => false;
 
+/** The slice of the TUI the widget factory callback reads. */
+function stubTui(overrides: { columns?: number; rows?: number } = {}) {
+	return {
+		terminal: { columns: overrides.columns ?? 200, rows: overrides.rows ?? 40 },
+		requestRender: () => {},
+	};
+}
+
+/** Identity theme — every helper returns its text unchanged, so assertions read plainly. */
+function stubTheme() {
+	return { fg: (_: string, t: string) => t, bold: (t: string) => t };
+}
+
 // Build a widget over a manager stub whose listAgents() returns a fixed list,
 // plus a recording UICtx. Both `setWidget` and `setStatus` are spies, so a test
 // can assert the key as well as the value; `lastContent()` reads the `content`
@@ -231,9 +244,7 @@ describe("AgentWidget — projection reads activity off Subagent records", () =>
 		widget.update();
 
 		expect(renderFn).toBeDefined();
-		const stubTui = { terminal: { columns: 200 }, requestRender: () => {} };
-		const stubTheme = { fg: (_: string, t: string) => t, bold: (t: string) => t };
-		const lines = renderFn!(stubTui, stubTheme).render();
+		const lines = renderFn!(stubTui(), stubTheme()).render();
 		const allText = lines.join("\n");
 		// Turn 3 from the record should appear
 		expect(allText).toContain("↻3");
@@ -298,13 +309,12 @@ describe("AgentWidget — self-drives from lifecycle notifications", () => {
 		expect(typeof lastContent()).toBe("function");
 	});
 
-	it("starts the update timer and renders on onSubagentCreated", () => {
+	it("renders a queued agent without starting the timer, since nothing animates", () => {
 		const { widget, lastContent } = makeWidget([{ id: "a1", status: "queued" }]);
-		expect(vi.getTimerCount()).toBe(0);
 
 		widget.onSubagentCreated(createTestSubagent({ id: "a1", status: "queued" }));
 
-		expect(vi.getTimerCount()).toBe(1);
+		expect(vi.getTimerCount()).toBe(0);
 		expect(typeof lastContent()).toBe("function");
 	});
 
@@ -351,11 +361,7 @@ describe("AgentWidget — background-only filtering", () => {
 		};
 		widget.setUICtx(ui);
 		const lastContent = () => setWidgetCalls.at(-1);
-		const renderLines = () => {
-			const stubTui = { terminal: { columns: 200 }, requestRender: () => {} };
-			const stubTheme = { fg: (_: string, t: string) => t, bold: (t: string) => t };
-			return renderFn!(stubTui, stubTheme).render();
-		};
+		const renderLines = () => renderFn!(stubTui(), stubTheme()).render();
 		return { widget, lastContent, renderLines };
 	}
 
@@ -393,6 +399,101 @@ describe("AgentWidget — background-only filtering", () => {
 		const text = renderLines().join("\n");
 		expect(text).toContain("background task");
 		expect(text).not.toContain("foreground task");
+	});
+});
+
+describe("AgentWidget — the animation timer tracks running agents", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("stops the timer when the last running agent finishes, leaving the widget registered", () => {
+		const agents = [{ id: "a1", status: "running", completedAt: undefined as number | undefined }];
+		const { widget, lastContent } = makeWidget(agents);
+		widget.onSubagentStarted(createTestSubagent({ id: "a1", status: "running" }));
+		expect(vi.getTimerCount()).toBe(1);
+
+		agents[0].status = "completed";
+		agents[0].completedAt = 5000;
+		widget.onSubagentCompleted(createTestSubagent({ id: "a1", status: "completed" }));
+
+		expect(vi.getTimerCount()).toBe(0);
+		expect(typeof lastContent()).toBe("function");
+	});
+
+	it("stops the timer when a run finishes while another agent is still queued", () => {
+		const agents = [
+			{ id: "a1", status: "running", completedAt: undefined as number | undefined },
+			{ id: "a2", status: "queued", completedAt: undefined as number | undefined },
+		];
+		const { widget, lastContent } = makeWidget(agents);
+		widget.onSubagentStarted(createTestSubagent({ id: "a1", status: "running" }));
+		expect(vi.getTimerCount()).toBe(1);
+
+		agents[0].status = "completed";
+		agents[0].completedAt = 5000;
+		widget.onSubagentCompleted(createTestSubagent({ id: "a1", status: "completed" }));
+
+		expect(vi.getTimerCount()).toBe(0);
+		expect(typeof lastContent()).toBe("function");
+	});
+
+	it("starts the timer when a queued agent begins running", () => {
+		const agents = [{ id: "a1", status: "queued", completedAt: undefined as number | undefined }];
+		const { widget } = makeWidget(agents);
+		widget.onSubagentCreated(createTestSubagent({ id: "a1", status: "queued" }));
+		expect(vi.getTimerCount()).toBe(0);
+
+		agents[0].status = "running";
+		widget.onSubagentStarted(createTestSubagent({ id: "a1", status: "running" }));
+
+		expect(vi.getTimerCount()).toBe(1);
+	});
+});
+
+describe("AgentWidget — animation cadence", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	// The widget is the only thing driving Pi's renderer while the parent idles,
+	// and each render walks the whole component tree, so the cadence is a cost
+	// paid per running agent for as long as it runs.
+	it("asks Pi for one render per 250 ms while an agent runs", () => {
+		const record = createTestSubagent({
+			id: "a1",
+			status: "running",
+			completedAt: undefined,
+			isBackground: true,
+		});
+		const manager = { listAgents: () => [record] } as unknown as SubagentManager;
+		const widget = new AgentWidget(manager, new AgentTypeRegistry(() => new Map()));
+		const requestRender = vi.fn();
+		widget.setUICtx({
+			setStatus: () => {},
+			setWidget: (_key, content) => {
+				content?.({ terminal: { columns: 200, rows: 40 }, requestRender }, stubTheme());
+			},
+		});
+
+		widget.onSubagentStarted(record);
+		expect(requestRender).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(249);
+		expect(requestRender).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+
+		widget.dispose();
 	});
 });
 

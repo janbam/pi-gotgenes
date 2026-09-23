@@ -34,10 +34,10 @@ if [ -z "$current" ]; then
   # version here — it falls back to `0.1.0` and then rejects it for not matching
   # the tag pattern — and there is no convention to infer one from: this repo's
   # packages opened at 1.0.0, 0.2.0, and 0.1.0. The first release is a manual,
-  # operator-chosen step anyway (AGENTS.md: npm Trusted Publishing cannot create
+  # operator-chosen step anyway (.pi/skills/releasing/SKILL.md: npm Trusted Publishing cannot create
   # a package that does not exist), so refuse rather than invent a version.
   echo "Error: '$pkg' has no ${pkg}-v* tag, so it has never released." >&2
-  echo "       Publish and tag the first version by hand (see AGENTS.md), then" >&2
+  echo "       Publish and tag the first version by hand (see .pi/skills/releasing/SKILL.md), then" >&2
   echo "       this script takes over." >&2
   exit 1
 fi

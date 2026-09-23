@@ -54,8 +54,9 @@ This makes it easy to verify which files the extension actually loaded:
 - This is a permission decision layer, not a sandbox — for true isolation see [Agent Sandboxes](https://engine.build/lab/agent-sandboxes).
   The two are complementary rather than alternatives: a sandbox enforces which paths are in scope and in which direction, while this package decides whether a particular action on an in-scope path may proceed.
   [ADR 0013] §8 records that division and the seam that exports this package's scope decisions to a sandbox launcher.
-- The review log records bash command strings unredacted.
-  Log files are created owner-only (`0600`), and values bound to a sensitive key name (`authorization`, `token`, `password`, …) are masked — but a secret embedded in a command string is not.
+- The review log records bash command strings, masked only where a name binds the secret.
+  Log files are created owner-only (`0600`), and a value bound to a sensitive name (`authorization`, `token`, `password`, a bare or suffixed `key`, …) is masked — whether the name is a log key, a shell variable, or a request header field.
+  A secret with no name bound to it, such as one typed as a `grep` pattern, is not.
   Review-log values are shortened at `reviewLogFieldMaxWidth` (1000 characters by default), which bounds the file's growth but is a length cap, not redaction.
   See [Log file sensitivity](configuration.md#log-file-sensitivity) and [ADR 0010].
 

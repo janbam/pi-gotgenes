@@ -7,8 +7,85 @@ date: 2026-07-25
 
 ## Status
 
-Accepted.
+Accepted, as amended 2026-09-15 and 2026-09-19.
 This decision states what the permission logs protect against and what they do not, so a report of the shape "the log contains a secret" can be triaged against a written contract rather than re-argued.
+
+### Amendment, 2026-09-19 — an inline-shell payload is masked; a heredoc body is not, and that is the decision
+
+The 2026-09-15 amendment's third residual named two uncovered contexts and tracked both as [#923].
+One is now closed and the other is **accepted rather than tracked**, which is the substance of this amendment.
+
+`command-redaction.ts` re-parses an **inline-shell payload** — the argument `classifyWrapperWords` already identifies as `"opaque-payload"`: `eval`'s first argument, and the argument after a `-c` short-flag cluster for `bash`/`sh`/`dash`/`zsh`/`ksh`.
+The payload's verbatim inner slice is parsed on its own and the recovered spans are shifted by the slice's start index, bounded at four nested layers.
+Because the slice excludes the payload's quotes, no span can reach one, so the masked payload stays quoted as it was written.
+Indirection layers are peeled first, so `sudo bash -c '…'` and `xargs -I{} sh -c '…'` are reached too — `executedUnit` peels them, so a payload query that did not would reintroduce the same inconsistency one wrapper layer up.
+That closes the internal inconsistency the residual named: `bash -c 'TOKEN=sk-secret deploy'` no longer reads masked under `executedUnit` and verbatim under `command` in the same record.
+
+One payload shape is masked **coarsely** rather than precisely.
+A payload whose program is stitched across quote boundaries (`bash -c 'TOKEN='"$SECRET"`, one `concatenation` node) has no constant offset mapping a span in the program back onto the command, so when its program binds a secret the whole argument is replaced rather than the value alone.
+That costs the command text for that argument and is the correct trade against writing the secret; it fires on none of the corpus's commands.
+An `ansi_c_string` payload (`bash -c $'…'`) is precise, since skipping the `$` leaves a single quote pair.
+
+A **heredoc body is declined**, interpolating or not, and the measurement is the argument rather than a preference.
+Measured over 8 056 unique command strings from a 13 MB review log (17 981 records):
+
+| Context                                            | Occurrences                  | Masks | False positives |
+| -------------------------------------------------- | ---------------------------- | ----- | --------------- |
+| Inline-shell payload                               | 48 units across 42 commands  | 0     | 0               |
+| Interpolating heredoc body (`<<EOF`)               | 3                            | 0     | 0               |
+| Non-interpolating heredoc body (`<<'EOF'`)         | 915                          | 6     | **6**           |
+| Herestring (`<<<`)                                 | 0                            | —     | —               |
+
+Three of the six are `key=lambda` / `key=len` inside embedded Python and one is `console.log("tokens:", …)` in TypeScript — the exact class this record measured at 10-versus-0 when it chose grammar anchoring over a raw-string scan.
+The rule would still match a parse node; what fails is that the *body* being re-parsed is not shell, so the anchor buys nothing.
+A quoted heredoc is where an agent writes source code to a file, and 915 of the corpus's 918 bodies are that form.
+Cost is the secondary argument: every heredoc body raises the masker from 0.050 ms to 0.123 ms per command against 0.061 ms for payloads alone.
+
+So a `.env` written by heredoc (`cat > .env <<'EOF'` / `API_KEY=…` / `EOF`) stays unmasked.
+That is a real leak this record declines to close, not an oversight: the remedy for a session that will handle credentials on the command line is `"permissionReviewLog": false`, as below.
+Reopening it needs a report of a real leak through that context — the same bar this record set for [#920], and the bar that report met.
+
+A **herestring** payload (`cmd <<< "TOKEN=sk-x"`) is a third residual, declined for want of any measured population.
+
+Across the whole corpus, **no command logs differently** than before this change: the payload rule has zero true positives there as well as zero false ones, so it is a consistency fix and forward protection rather than a remedy for a leak already written.
+
+### Amendment, 2026-09-15 — the reopen condition was met, and the nominated remedy was wrong
+
+The *Grammar-anchored bash redaction* alternative below recorded itself as "the concrete next step should a report show a secret reaching the log through a command string".
+[#920] is that report: measured on a real install with `permissionReviewLog: true`, 35 records held a live API key verbatim in the `command` field — 19 through a `KEY="<secret>"` env-prefix assignment, 8 through `curl … -H "Authorization: Bearer <secret>"`, 2 through a `grep` pattern, 6 through other forms.
+
+The report also **corrects** the remedy this record nominated, which is the more useful half.
+The nominated rule masks the value of an assignment whose name is sensitive; the name actually used was `KEY`, and the shipped predicate carried `api[-_]?key` and `private[-_]?key` but no bare or suffixed `key`.
+So all 19 assignment leaks would have been written unredacted even after the nominated rule landed.
+The correction is adopted with credit.
+
+What shipped:
+
+- The sensitive-name predicate gained a name-boundary `key` rule (`KEY`, `OPENROUTER_KEY`, `MY_KEY`, `apiKey`, `sortKeys`), as a **union** with the pattern it replaces, so it adds names and drops none.
+  `monkey`, `keyboard`, and `turnkey` do not match.
+- `command-redaction.ts` masks a value bound to a sensitive name **inside** a command string, in three binding forms: a `variable_assignment` value, a `word`-shaped assignment (`env MY_KEY=abc deploy`), and an argument of the form `<sensitive-name>: <value>` (the header vector).
+  Every rule matches a parse node, never a substring.
+- The pass runs at `writeLine`, ahead of the width cap and for both streams.
+
+The technique is unchanged: **structural, never predictive**.
+What changed is that a name can now be a shell variable or a request header field, not only a log key.
+Grammar anchoring is what makes that affordable, and the measurement is the argument: over 7 146 unique commands from a 12 MB review log, a raw-string scan for a sensitively-named assignment matched 10 commands and every one was a false positive — `key=lambda x: x[1]` and `keys=list(d.keys())` inside embedded Python, plus a `sed` pattern that was itself a redaction.
+The node-anchored rule matched none of them.
+The header rule additionally requires the field name not to be camel-cased, because an HTTP field name is hyphenated (`X-Api-Key`) and without that clause the corpus's only false positives were two records of `grep "legalDirectionalKeys: readonly"`.
+Across the whole corpus, 2 of 7 146 commands log differently than before.
+
+Three residuals are accepted rather than hidden:
+
+- A secret with **no name bound to it** — the report's 2 `grep`-pattern records — is out of reach of any structural rule and stays unmasked.
+  That is the surviving half of the boundary below, not an oversight.
+- A **recovering parse** (3.9 % of corpus commands) yields whatever spans the walk resolved and leaves the rest as written.
+  Blanking the field instead would cost the command text on every heredoc-bearing entry, which is the main reason this log is read.
+- An **inline-shell payload** (`bash -c 'TOKEN=… deploy'`) and a **heredoc body** carry no assignment node, so neither is masked — and `executedUnit` re-parses to a real assignment, so one record can hold the same secret masked under one key and unmasked under another.
+  Widening to them needs the wrapper analyzer, because blanket recursion into string nodes is exactly what re-admits the false-positive class above.
+  Superseded by the 2026-09-19 amendment above, which masks the payload and accepts the heredoc body as a residual.
+
+The report's second observation — that `chmod` is a no-op on Windows, so neither remedy was active there — is answered by this change rather than by a new mechanism: redaction does not depend on file modes.
+The reasoning against a per-session Windows warning, below, is unchanged.
 
 ## Context
 
@@ -81,13 +158,15 @@ More decisively, its failure boundary is unstatable: a redactor that silently mi
 This is the same reasoning already recorded for [#599] and `docs/decisions/0007-model-judge-authorizer-chain-adr.md`, where a hard-coded secret denylist was declined because the codebase has no formal secrets model.
 Secret *detection* is a product category (gitleaks, trufflehog, detect-secrets) with hundreds of continuously-maintained rules; the logging ecosystem's own answer — pino's `redact`, Winston's formats, Serilog's destructuring policies — is uniformly declarative key-path masking, not detection.
 
-### Grammar-anchored bash redaction — declined for now, the option a future report reopens
+### Grammar-anchored bash redaction — declined here, adopted by the 2026-09-15 amendment
 
 The package already parses every bash command into a tree-sitter AST and already walks `variable_assignment` nodes to strip env prefixes ([#481]) and embedded option values ([#645]).
 Masking the value side of an assignment whose name is sensitive, and the argument following `--token`/`--password`, would extend coverage to `FOO_TOKEN=abc deploy` with near-zero false positives, because it operates on parse nodes rather than on a guess about what a string looks like.
 
 Not taken here: it is materially more work than the key-name pass, and no reported case yet demands it.
 It is recorded as the concrete next step should a report show a secret reaching the log through a command string.
+
+[#920] is that report, and the amendment above records what shipped — including the respect in which the rule sketched here would not have caught the reported case.
 
 ### Making raw payload logging opt-in — declined
 
@@ -105,7 +184,8 @@ Revisit if a concrete downstream asks.
 
 ## Consequences
 
-- The stated boundary, which every user-facing mention repeats verbatim: **a value bound to a sensitive key name is masked; a secret embedded in a bash command string is not.**
+- The stated boundary, which every user-facing mention repeats verbatim, as amended 2026-09-15: **a value bound to a sensitive name is masked — whether the name is a log key, a shell variable, or a request header field.**
+  **A secret with no name bound to it, such as one typed as a `grep` pattern, is not.**
 - A key legitimately named `token` carrying a non-secret now reads `[redacted]` in the log.
   Accepted: the key set is narrow, and every structured field the gate logs (`toolName`, `action`, `reason`, `matchedPattern`, `origin`, `resolution`) falls outside it.
 - The change is POSIX-effective only.
@@ -119,3 +199,5 @@ Revisit if a concrete downstream asks.
 [#599]: https://github.com/gotgenes/pi-packages/issues/599
 [#645]: https://github.com/gotgenes/pi-packages/issues/645
 [#647]: https://github.com/gotgenes/pi-packages/issues/647
+[#920]: https://github.com/gotgenes/pi-packages/issues/920
+[#923]: https://github.com/gotgenes/pi-packages/issues/923

@@ -13,6 +13,7 @@ It prepares the branch for landing but does **not** touch `main`, close the issu
 For trunk work (committing directly on `main`), run `/ship $1` from the root instead; it detects the trunk lane and skips the fast-forward merge.
 
 Fetch the issue title via `gh issue view $1 --json title -q .title`, then call `set_session_name` with name `#$1 Sync (worktree) — <issue title>`.
+Load the `worktrees` and `git-workflow` skills before step 1 — the rebase rules live there.
 
 ## 1. Confirm this is a worktree branch
 
@@ -47,6 +48,7 @@ The stage note lives in an `exclude-paths` dir, so it triggers no release — bu
 3. Append a stage entry (anchor the `Edit` on the file's last line — the repeated `### Observations` headers make header-anchored edits ambiguous).
    Do not cite a branch commit SHA in this note — step 4's rebase rewrites every one, leaving a dangling citation on `main`.
    Name the commit by its subject instead (Refs #814).
+   On a re-run — the branch was already synced and `main` moved — append a dated line to the existing entry rather than a second `## Stage: Sync (worktree)` block (Refs #875).
 
    ```markdown
    ## Stage: Sync (worktree) (<ISO 8601 timestamp>)

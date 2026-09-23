@@ -1,12 +1,8 @@
 ---
 name: pi-extension-lifecycle
-description: >-
-  Reference for the Pi coding agent's turn/tool execution model and extension
-  event lifecycle. Use when designing extension timing (when to flush, notify,
-  or intercept), understanding event sequencing, or reasoning about what the
-  agent sees between turns. Includes the verified lifecycle diagram, event
-  handler capabilities, message delivery mechanics, and empirical session-data
-  patterns.
+description: |
+  Load before deciding when an extension should flush, notify, or intercept, or reasoning about
+  event order and what the agent sees between turns: the verified Pi turn/tool lifecycle.
 ---
 
 # Pi Extension Lifecycle Reference
@@ -118,7 +114,7 @@ Source: `@earendil-works/pi-agent-core` `agent.js`; `@earendil-works/pi-coding-a
 - On **normal** completion `finishRun()` discards the controller **without** aborting it — so the `abort` event fires only on a real interrupt, never at turn/run end.
 - The same per-run signal is passed to every `tool.execute(toolCallId, params, signal, …)` and exposed to handlers via `ctx.signal` (undefined when idle).
 
-Implication: to react to a user interrupt, latch `ctx.signal` (e.g. at `turn_start`) and listen for its `abort` event — it will not false-fire on normal completion. (Refs #403.)
+Implication: to react to a user interrupt, latch `ctx.signal` (e.g. at `turn_start`) and listen for its `abort` event — it will not false-fire on normal completion.
 
 ## Message delivery via `pi.sendMessage()`
 

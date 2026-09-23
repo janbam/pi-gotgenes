@@ -6,7 +6,7 @@ description: Land the work (trunk or worktree branch), verify CI, close the issu
 # Ship the implementation
 
 Argument: `$1` is the issue number that was just implemented, or the number of an adopted third-party PR.
-When it is empty, derive the number from the newest plan commit (`git log --format='%s' --grep='^docs: plan ' -1` → the trailing `(#N)`), name the issue you derived, and confirm it in step 0 — lane detection reads it.
+When it is empty, derive the number from the newest plan commit (`git log --format='%s' --grep='^docs: \(re-\)\?plan ' -1` → the trailing `(#N)`), name the issue you derived, and confirm it in step 0 — lane detection reads it.
 
 `/ship` runs at the **root** checkout on `main` in both of its lanes:
 
@@ -15,6 +15,9 @@ When it is empty, derive the number from the newest plan commit (`git log --form
 
 The lane is detected in step 1 and changes only five things: where the plan is read from (step 2), whether a branch is fast-forward-merged (step 4), the CI-failure recovery rule (step 7), whether a worktree is torn down (step 12), and the session name.
 Every other step is identical.
+
+Every SHA this run handles is command output, not a value you typed.
+Do not measure its shape (`| wc -c`), re-run the command to double-check, or count its characters — in prose or in reasoning (Refs #839, #904, #945).
 
 ## 0. Confirm you are at the root on `main`
 
@@ -38,6 +41,7 @@ Do this before anything else, so a mis-invocation costs nothing.
    - More than one match → stop and report; the ambiguity is a branch-naming collision the operator must resolve.
 2. Fetch the issue title: `gh issue view $1 --json title -q .title`.
 3. Call `set_session_name` — trunk lane: `#$1 Ship — <issue title>`; worktree lane: `#$1 Ship (worktree) — <issue title>`.
+4. Load the `git-workflow` and `releasing` skills now, and the `worktrees` skill in the worktree lane — the merge, the close comment, and the dispatch all sit on rules those carry.
 
 ## 2. Release coordination and close targets (decide before step 3)
 
@@ -109,6 +113,9 @@ Run from the **repo root** (not a package subdirectory), on the tree that is abo
 1. `pnpm run lint` — catches cross-package lint violations CI runs at root level; package-level `pnpm run lint` may miss sibling-package issues.
 2. `pnpm fallow dead-code` — CI runs this gate on every `main` push (not on PRs), so a pre-existing failure blocks your push regardless of whether this issue introduced it.
 
+Run each gate unpiped — a pipeline's exit status is the filter's, so `pnpm run lint | tail` reports success on a failure.
+Redirect instead: `pnpm run lint >/tmp/lint.log 2>&1 || tail -30 /tmp/lint.log`.
+
 If either fails, fix the issues and commit before pushing.
 
 Run these in **both** lanes, here rather than earlier.
@@ -124,7 +131,6 @@ Running them after step 4 covers exactly that tree, at a measured cost of about 
 
 1. Run `git rev-parse HEAD` to capture the full SHA.
    Pass that exact value to `ci_find` — never hand-expand the short SHA from the `git push` output, and never type a SHA from memory.
-   Do not measure its shape (`| wc -c`) — it is command output, not a value you typed (Refs #839).
 2. Use `ci_find` with that SHA and workflow `ci` to locate the CI run.
    If it times out, re-check the SHA you passed against `git rev-parse HEAD` before assuming a timing miss — a truncated or retyped SHA produces the same timeout (Refs #640).
 3. Use `ci_watch` with the returned `run_id`, workflow `ci`, and `timeout: 600` to wait for it to complete.
@@ -168,12 +174,14 @@ Build the close comment from this issue's own commits, anchored on the plan comm
 Each package releases on its own cadence, so a tag range spans every sibling issue that landed since: measured at 165 commits across 32 issues for a 13-commit change (Refs #817).
 
 ```bash
-PLAN=$(git log --format='%H' --grep="docs: plan .*(#$1)" -1)
+PLAN=$(git log --format='%H' --grep="docs: \(re-\)\?plan .*(#$1)" -1)
 git log --oneline "$PLAN"^..HEAD
 ```
 
+The `\(re-\)\?` alternation matters: a reopened issue is re-planned with a `docs: re-plan …` subject, and a bare `docs: plan` pattern silently resolves the **abandoned** original instead, yielding a range hundreds of commits wide (Refs #863).
 If no plan commit matches, anchor on the parent of the issue's first commit.
 In the worktree lane, use step 4's `PRE_MERGE` as the anchor instead when it is an ancestor of `"$PLAN"^` — the branch then carried pre-plan commits the plan range cannot see.
+That test is reflexive, so it also reports true when `PRE_MERGE` equals `"$PLAN"^`, where the two ranges are identical and either anchor works.
 
 The comment should include:
 
@@ -192,6 +200,7 @@ The comment should include:
 
 Before calling `issue_close`, re-resolve every hex token in the finished draft (`git rev-parse <sha>^{commit}`) and confirm each is an ancestor of `main` (`git merge-base --is-ancestor <sha> main`).
 Verify the draft, not your intent to cite — a pre-draft resolve cannot cover a hash drafting itself introduced, and after the call it can no longer prevent publishing one (Refs #788, #814, #890).
+Compose the draft in the `issue_close` call itself, never in a scratch file — the tool takes a string, so a staged file is verified and then retyped, and the two copies are not the same artifact (Refs #861).
 
 Then use `issue_close` with issue number `$1` and the summary as the comment.
 
@@ -221,11 +230,12 @@ Skip this step entirely if step 8 recorded a defer/batch decision — the releas
 1. Derive candidate packages from the paths the range touched, not from commit types (re-derive `PLAN` — a fresh shell does not carry step 9's):
 
    ```bash
-   PLAN=$(git log --format='%H' --grep="docs: plan .*(#$1)" -1)
+   PLAN=$(git log --format='%H' --grep="docs: \(re-\)\?plan .*(#$1)" -1)
    git diff --name-only "$PLAN"^..HEAD | sed -n 's#^packages/\([^/]*\)/.*#\1#p' | sort -u
    ```
 
    Use step 4's `PRE_MERGE` as the anchor instead when it is an ancestor of `"$PLAN"^`.
+   That test is reflexive, so it also reports true when `PRE_MERGE` equals `"$PLAN"^`, where the two ranges are identical and either anchor works.
    A pre-plan commit touching a sibling package is invisible to the plan range, and the dispatch would silently omit that package (Refs #899).
 
    Do not filter by commit type: `docs:` and `chore:` are visible changelog groups that cut a patch on their own, so a `feat|fix` scope grep silently drops a sibling bumped by a docs-only commit (Refs #857).
@@ -252,7 +262,10 @@ Skip this step if step 10 was skipped (deferred/batch release, or nothing to rel
    A dispatched run's `head_sha` is `main`'s tip at dispatch time, so it matches the SHA you pinned.
    If `ci_find` times out, the dispatch's SHA guard most likely failed because `main` moved — check the run list before re-dispatching.
 2. If the `prepare` or `github-release` job failed, stop — do not proceed.
-   `prepare` failing means nothing was tagged and the release can simply be re-dispatched.
+   `prepare` failing means nothing was tagged and the release can simply be re-dispatched — **once**.
+   A second identical failure is a defect, not flake; diagnose before a third.
+   For an opaque exit code with no diagnostic, diff the failing run's log timestamps against the last successful run's (`ci_list`, then `gh run view <id> --log`) before building a local reproduction.
+   A step that dies in 10 ms where the green run took 13.5 s to reach the next line localizes the failure without tracing (Refs #919).
    `github-release` failing means the tags are already pushed: fix the cause and re-run that job rather than re-dispatching, which would refuse on the existing tag.
    This personal fork never publishes to npm; a `publish` job appearing in the workflow is a blocker, not a release stage to run.
 3. After the run succeeds, `git pull --ff-only` to bring the release commit and tags down.
@@ -269,7 +282,8 @@ The branch deletes cleanly because its commits are now in `main`; the worktree i
 Print:
 
 - The new HEAD on `main` (`git log --oneline -1`); confirm `git status -sb` shows no unpushed commits before naming it.
-- The released version **per package** released, one line each (`git tag --points-at HEAD` or read `package.json`), or that the release was deferred and why.
+- The released version **per package** released, one line each — `git tag --points-at HEAD` (after step 11.3's pull the release commit is HEAD), or read `package.json` — or that the release was deferred and why.
+  Empty output from that command is a finding, not a cue to cite the other source silently.
   Name every package step 10.1 listed — a listed package with no released version is a miss, not an omission from the report.
 - Issue close confirmation(s), including any co-shipped issue and any third-party PR closed.
 - Worktree/branch teardown confirmation (worktree lane).

@@ -53,6 +53,7 @@ Skip any already in this session's context — the trunk flow runs planning, imp
 - Load the `code-design` skill for design principles, TypeScript conventions, and structural heuristics.
 - Load the `testing` skill for Vitest mock patterns and TDD planning rules.
 - Load the `pre-completion` skill — you will use it after the final TDD step to dispatch the quality reviewer.
+- Load the `git-workflow` skill before the first commit, and the `edit-tool` skill before a multi-entry `Edit`, a scripted substitution, or a block insertion.
 
 ## Verify green baseline
 
@@ -101,6 +102,7 @@ For **each** step in the plan's "TDD Order", in order:
    Re-run before committing; never commit with a mutation in the tree.
    Apply the mutation with `Edit`, and confirm the file changed before reading the suite — a scripted multi-line substitution that matches nothing reads exactly like a mutation that killed nothing, and one that matches every sibling site reddens tests the mutation was never meant to touch (Refs #870).
    Prefer changing a compared literal over restructuring control flow: a mutation that crashes, or that the linter rejects, produces reds that are not discrimination signals (Refs #883).
+   Such a mutation can also produce too *few* reds — swapping a guard's `return x` for a `throw` changes nothing observable when a downstream `catch` returns `x` too (Refs #920).
    Count the reds against the step's prediction: a mutation that kills fewer tests than the plan named is a finding, not a pass — the test was never written, the plan's claim was wrong, or the mutated code is dead (Refs #844, #894).
 4. **Commit.**
    Use the commit message the plan suggests, or a Conventional Commits message that matches:
@@ -209,6 +211,7 @@ Before stopping, persist implementation observations for cross-session continuit
 4. Commit: `git add <retro-file> && git commit -m "docs(retro): add TDD stage notes for issue #N"`.
 
 Wrap code identifiers, filenames, and text containing underscores in backticks in the retro file.
+Name a commit by its subject, not its SHA, when the work is on an `issue-<N>-*` branch — `/sync-worktree`'s rebase rewrites every branch SHA (Refs #814, #914).
 Append with the `Edit` tool (or `Write` for a new file), not a shell heredoc.
 When appending a new stage to an existing retro, anchor the `Edit` on the file's last line or use `Write` with the full content — the repeated `### Observations` / `### Session summary` headers make header-anchored edits ambiguous.
 

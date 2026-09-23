@@ -112,7 +112,7 @@ The `pre-completion-reviewer` returned PASS and both CI runs (push and release) 
   Impact: none — the `prek` `commit-msg`/`pre-commit` hook caught the four lint errors and blocked the commit.
   The rule's own example already shows `&&`; this was a failure to follow it, not a gap in it.
 - `other` — emitted a zero-width space (U+200B) into the plan file, then spent four tool calls diagnosing why a `perl` substitution would not match it.
-  The text `void …​.catch(debugLog)` reached the file through a `Write` call; `perl -i -pe` then failed silently because it treats the file as bytes without `-CSD`.
+  The text `void ….catch(debugLog)` reached the file through a `Write` call; `perl -i -pe` then failed silently because it treats the file as bytes without `-CSD`.
   Diagnosis needed a `hexdump`.
   Impact: four extra tool calls (turns 54–57), no rework.
   The wholesale non-ASCII scan (`rg -n '[^\x00-\x7f]'`) that `AGENTS.md` recommends found it immediately — but only after the failure, not before.

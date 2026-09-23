@@ -1,6 +1,9 @@
 {
   "$schema": "https://raw.githubusercontent.com/gotgenes/pi-autoformat/main/schemas/pi-autoformat.schema.json",
   "formatters": {
+    "invisible-characters": {
+      "command": ["node", "scripts/lint/invisible-characters.mjs", "--fix"]
+    },
     "biome": {
       "command": [
         "pnpm",
@@ -16,8 +19,8 @@
     }
   },
   "chains": {
-    ".ts": ["biome"],
-    ".json": ["biome"],
-    ".md": ["rumdl"]
+    ".ts": ["invisible-characters", "biome"],
+    ".json": ["invisible-characters", "biome"],
+    ".md": ["invisible-characters", "rumdl"]
   }
 }

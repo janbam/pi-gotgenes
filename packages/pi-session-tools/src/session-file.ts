@@ -47,6 +47,11 @@ export function readSessionFileEntries(
   return entries;
 }
 
+/** Whether a session file exists on disk. */
+export function sessionFileExists(file: string): boolean {
+  return existsSync(file);
+}
+
 /**
  * Encode a cwd to Pi's session-directory name: strip the leading `/`,
  * replace every `/` with `-`, and wrap the result in `--…--`.

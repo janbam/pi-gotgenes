@@ -1,10 +1,8 @@
 ---
 name: code-design
 description: |
-  TypeScript conventions, code design principles (SOLID, self-documenting code, file organization),
-  structural design heuristics (dependency width, LoD, output arguments),
-  pnpm rules, ES2024 target, Pi SDK patterns, and Biome/ESLint conflict workarounds.
-  Load during implementation, refactoring, or code review.
+  Load before writing, refactoring, or reviewing TypeScript, and before designing around a Pi SDK internal:
+  naming, SOLID and structural heuristics, pnpm/ES2024 rules, Pi SDK boundaries, reading Pi's source, Biome/ESLint workarounds.
 ---
 
 # Code Design
@@ -156,17 +154,24 @@ A classifier answering "what is this?"
 may return "not X" for anything it does not recognize; a guard answering "is it safe to proceed?"
 must return "not safe" for the same input.
 Reusing the first as the second turns every unrecognized shape into a silent pass.
-Name the two apart — `provesX` versus `mayX` — so each call site reads its own burden (Refs #803).
+Name the two apart — `provesX` versus `mayX` — so each call site reads its own burden.
 
 ### Decision provenance
 
 When a system decides on the user's behalf, record what decided and on what basis — not only the outcome.
-A log showing `approved` without _approved by whom_ cannot distinguish a human approval from an auto-approval, which is the distinction an audit needs (Refs #726).
+A log showing `approved` without _approved by whom_ cannot distinguish a human approval from an auto-approval, which is the distinction an audit needs.
 
 ### Preparatory refactoring (tidy first)
 
 Before planning or landing a refactor as one atomic commit, ask whether a preparatory step would shrink it — a pure-addition interface, or migrating tests to a shared fixture — landed as separate commits first.
 Kent Beck: "make the change that makes the change easy, then make the easy change."
+
+### Removing code you shipped
+
+When deciding whether to keep shipped code whose justification has weakened, ask: if it did not exist today, knowing what we know now, would we write it?
+If no, remove it.
+Past investment, passing tests, and "it's harmless" describe what was spent, not a reason to keep.
+When the removal undoes a series of commits, `git revert` them rather than hand-editing the files back — a mechanical revert is auditable and its result is diffable against the pre-change tree.
 
 ## TypeScript
 
@@ -198,7 +203,7 @@ When a new capability is needed in a library module, accept it as a parameter or
 Before redeclaring a Pi SDK type locally, check whether it's already exported from `@earendil-works/pi-ai` or `@earendil-works/pi-coding-agent`.
 Import directly when the exported type matches; redeclare only when narrowing is intentional (ISP).
 
-When a design or an `ask_user` option hinges on calling an SDK method, confirm it on the exact type the code holds (e.g. `pi: ExtensionAPI`), not an analogous adjacent type — the per-event `ctx` or internal runtime may bind a getter the public surface omits (e.g. `getSystemPrompt`, #437).
+When a design or an `ask_user` option hinges on calling an SDK method, confirm it on the exact type the code holds (e.g. `pi: ExtensionAPI`), not an analogous adjacent type — the per-event `ctx` or internal runtime may bind a getter the public surface omits (e.g. `getSystemPrompt`).
 
 When writing event handlers that consume Pi SDK types, prefer lean local payload interfaces over full SDK event types.
 The SDK may not export all event interfaces, and exported types often require fields the handler does not read.
@@ -208,10 +213,23 @@ When a shared function parameter must accept SDK content types (e.g., `TextConte
 SDK interfaces lack index signatures; index-signature parameters force `as unknown as` double-casts at call sites.
 
 When writing `promptGuidelines` for a tool registration, name the tool in every bullet — Pi flattens all tools' guidelines into one `Guidelines:` block without per-tool attribution ([earendil-works/pi#4879](https://github.com/earendil-works/pi/issues/4879)).
-Reserve `promptGuidelines` for guidance an agent needs _before_ choosing the tool — the block sits in every session's system prompt, so post-result guidance ("do not retry on X") belongs in the tool's `description` or its result text (Refs #764).
+Reserve `promptGuidelines` for guidance an agent needs _before_ choosing the tool — the block sits in every session's system prompt, so post-result guidance ("do not retry on X") belongs in the tool's `description` or its result text.
 
 When a tool's `execute` returns a discriminated-union `details` (e.g. `{ kind: "transcript" } | { kind: "status" }`), `defineTool` infers its `TDetails` generic from the first narrowed return and rejects the other branch.
 Cast each return's `details` `as <Union>` so the full union flows into the generic — `satisfies <Union>` keeps the narrowed branch type and does not fix the inference.
+
+### Reading Pi's own source
+
+- For Pi SDK internals (prompt assembly, caching, session lifecycle), read Pi's own source at the `pi` checkout beside this repo's main checkout, rather than the installed `dist/` bundles or their sourcemaps.
+  That is `../pi` from the root checkout and `../../pi` from a worktree — the worktree sits one level deeper, so the bare `../pi` misses it.
+  Dispatch an `Explore` subagent with `model: "sonnet-5"` for a multi-hop trace there (e.g. "how does `ui.custom` pass keybindings to the factory?") — a targeted read of a known file is fine inline, but a hunt costs 5–10 greps of this session's context, and `Explore`'s haiku default is too weak for the reasoning.
+  Keep the trace inline when its output is a universal claim the design will rest on — a subagent returns it as a summary you would have to re-verify anyway.
+  The checkout tracks Pi's `main` and runs ahead of the pinned dependency.
+  Read it for mechanism, but confirm any API you design around exists in the installed version first — resolve the version from the package's own `devDependencies` pin, then `grep` the types under that exact `node_modules/.pnpm/@earendil-works+pi-coding-agent@<version>_*/` directory.
+  The bare `@*/` glob matches every version in the store, and `head -1` can select one below the package's declared peer floor.
+  Existence is not enough for a seam you design _around_: a callback's position in the call order, and the data populated by the time it fires, are visible only in the compiled `.js`, never in the `.d.ts`.
+  A line number read there is not citable at all: the checkout drifts mid-session.
+  Cite the pinned version from the installed package's sourcemap — `dist/*.js.map`, `sourcesContent`.
 
 ## Tooling
 
@@ -258,9 +276,9 @@ Fix: use a `for...of` loop instead of `.forEach()` when a callback mutates a var
 ### Speculative eslint-disable directives
 
 Add an `eslint-disable` directive only after the linter reports the rule, never preemptively — the pre-commit auto-fix strips an unused directive and leaves a stray blank line (an inline disable above an object-literal property).
-A `||`-for-defaulting on a non-nullable primitive (e.g. `string`) does not trip `prefer-nullish-coalescing`, so no disable is needed (Refs #596).
+A `||`-for-defaulting on a non-nullable primitive (e.g. `string`) does not trip `prefer-nullish-coalescing`, so no disable is needed.
 
 ### no-deprecated on a deliberate deprecation
 
 Tagging an exported symbol `@deprecated` makes `@typescript-eslint/no-deprecated` an error at every internal call site — including the tests that pin the deprecated path's preserved behavior.
-Add a file-level `eslint-disable` with a reason to those tests; do not drop the tag or migrate them to the replacement (Refs #699).
+Add a file-level `eslint-disable` with a reason to those tests; do not drop the tag or migrate them to the replacement.

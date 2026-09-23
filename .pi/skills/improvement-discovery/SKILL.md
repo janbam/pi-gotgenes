@@ -1,10 +1,8 @@
 ---
 name: improvement-discovery
 description: |
-  Heuristics and process for discovering structural improvements in a package.
-  Load when planning a new improvement round — contains the smell taxonomy,
-  analysis workflow, and prioritization framework distilled from 10 phases of
-  pi-subagents refactoring.
+  Load before `/plan-improvements` discovery or editing an improvement roadmap:
+  smell taxonomy, analysis workflow, prioritization, and the `Release:` tag convention.
 ---
 
 # Improvement Discovery
@@ -15,7 +13,7 @@ It codifies the patterns, smell categories, and analysis workflow that have prov
 ## Analysis workflow
 
 Follow this order — each step builds context for the next.
-Lead with the cause hypothesis, not the tool: fallow finds symptoms by construction (it is syntactic), so running it first frames the whole analysis around symptoms.
+Lead with the cause hypothesis, not the tool: fallow measures structure rather than intent, so it finds symptoms by construction and running it first frames the whole analysis around them.
 
 ### 1. Read the architecture document and form a cause hypothesis
 
@@ -47,6 +45,28 @@ pnpm fallow dupes --workspace @gotgenes/<PKG> 2>&1 || true
 ```
 
 Capture: health score, dead exports, production duplication (`fallow dupes` excludes test files by default), hotspots, refactoring targets.
+
+Four further reads, each answering something the three commands above cannot (the `fallow` skill carries the details and the caveats):
+
+```bash
+# Real CRAP scores: the estimate both hides hotspots and invents them.
+pnpm --filter @gotgenes/<PKG> exec vitest run --coverage --coverage.provider istanbul \
+  --coverage.reporter json --coverage.reportsDirectory /tmp/cov-<PKG>
+pnpm fallow health --coverage /tmp/cov-<PKG>/coverage-final.json --score --hotspots --targets --workspace @gotgenes/<PKG> 2>&1 || true
+
+# Drift since the last phase close, against the committed snapshot.
+rm -rf .fallow/snapshots && mkdir -p .fallow/snapshots
+cp packages/<PKG>/docs/fallow-snapshot.json .fallow/snapshots/baseline.json
+pnpm fallow health --trend --workspace @gotgenes/<PKG> 2>&1 || true
+
+# Untested-but-reachable files and exports (discount barrel re-exports).
+pnpm fallow health --coverage-gaps --workspace @gotgenes/<PKG> 2>&1 || true
+
+# Public-signature type coupling: a file that depends on many and is used by none is a bag lead.
+pnpm fallow health --type-aware --type-aware-project packages/<PKG>/tsconfig.json --type-coupling --workspace @gotgenes/<PKG> 2>&1 || true
+```
+
+`similar-code` finds intent-level overlap `dupes` misses, but needs an explicit local model download (`fallow similar-code setup`); treat it as opt-in and do not run it as part of discovery.
 
 Fallow is blind to repeated discriminators — scattered one-line conditionals never form a token-run clone — so sweep for them alongside it:
 
@@ -196,7 +216,7 @@ Priority = Impact × (6 − Risk)
 
 > **Fallow-CRAP gotcha.**
 > Fallow estimates CRAP from static reference tracing when no coverage file is supplied, and the estimate is unreliable — a module with a real test file can report a CRAP in the 70s.
-> Before citing a CRAP score as a step's motivation, either run `fallow health --coverage <file>` with a real coverage file or confirm whether a test file exists for the module.
+> Before citing a CRAP score as a step's motivation, run the Step 3 coverage feed so the score comes from real coverage: the estimate reported `tools/agent-tool.ts` at 13.8 where Istanbul data says 42.0, and flagged twelve pi-subagents files above the threshold where real coverage flags five.
 > Treat estimated CRAP as a hint, not a finding — never let a step earn its place on an estimated score.
 
 ## Grouping heuristics
@@ -290,7 +310,7 @@ The plan should produce:
    `./scripts/roadmap-check.mjs <pkg>` validates the published inputs above against each other, so four structural anchors are load-bearing: the `### Steps` subsection steps are taken from, the single ```mermaid fence, `### Parallel tracks`, and `### Release batches`.
    It verifies that `Priority` equals `Impact × (6 − Risk)` rather than taking the published product on trust, that every step carries exactly one recognized `Release:` tag whose batch resolves to a bullet, that steps and diagram nodes correspond, and that the hard-dependency graph is acyclic.
    It also holds each `**Hard dependency:**` bullet to the diagram's solid edges in both directions — the diagram is the dependency authority and the bullet is the explanation — and reports a step named in no track or no release batch.
-   Run it before committing a roadmap (Refs #894).
+   Run it before committing a roadmap.
 7. **Open-issue sweep dispositions** — the Step 2 verdicts, under a `#### Open-issue sweep dispositions` heading inside the roadmap's `### Findings (planned YYYY-MM-DD)` section.
    Use that exact spelling: the `roadmap-fit` skill appends a bullet to it whenever an issue is spun off mid-phase, and `/finish-phase` greps it to reconcile phase-born issues before archiving.
    A bold prose lead-in or a per-phase variant (`Deferred work (explicit dispositions, …)`) breaks both.
@@ -304,7 +324,7 @@ These are failure modes and corrections discovered empirically.
 
 - **Don't plan a single step that rewrites an entire large test file** — use lift-and-shift (introduce new alongside old, migrate incrementally, remove old last).
 - **Start from index.ts outward** — the composition root reveals wiring overhead, coupling, and initialization hazards that file-by-file analysis misses.
-- **Test setup is a production-design signal** — `fallow`'s syntactic metrics miss god objects, closure density, and DIP violations.
+- **Test setup is a production-design signal**, and fallow's structural metrics miss the god objects, closure density, and DIP violations it reveals.
   When a unit needs module-level `vi.mock`, wide `as unknown as` casts, or a multi-field fixture, the production object is hard to construct — fix the object, not the test.
   The test is the symptom; the production object is the disease.
 - **Testability friction is a boundary probe.**

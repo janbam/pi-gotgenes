@@ -11,6 +11,8 @@ Configuration is loaded from these files, in order:
 
 Project config overrides global config.
 
+> If the `PI_CODING_AGENT_DIR` environment variable is set, Pi uses that directory instead of `~/.pi/agent`, and the global config is read from `$PI_CODING_AGENT_DIR/extensions/pi-autoformat/config.json`.
+
 ## Schema validation
 
 The config file is designed to support JSON Schema validation and autocomplete.

@@ -79,6 +79,22 @@ describe("readSessionFileEntries", () => {
   });
 });
 
+describe("sessionFileExists", () => {
+  it("reports a session file that is present", async () => {
+    const { sessionFileExists } = await import("#src/session-file");
+    mockExistsSync.mockReturnValue(true);
+    expect(sessionFileExists("/sessions/--project--/s.jsonl")).toBe(true);
+  });
+
+  it("reports a session file that is absent", async () => {
+    const { sessionFileExists } = await import("#src/session-file");
+    mockExistsSync.mockReturnValue(false);
+    expect(sessionFileExists("/sessions/--project--/missing.jsonl")).toBe(
+      false,
+    );
+  });
+});
+
 describe("encodeCwdToSessionDirName", () => {
   it("strips the leading slash, replaces slashes with dashes, and wraps in --...--", async () => {
     const { encodeCwdToSessionDirName } = await import("#src/session-file");

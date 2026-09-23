@@ -1,5 +1,5 @@
 ---
-status: amended by 0008
+status: amended by 0008 and 0010
 date: 2026-08-30
 ---
 
@@ -7,11 +7,12 @@ date: 2026-08-30
 
 ## Status
 
-Accepted, and amended by [ADR 0008].
+Accepted, and amended by [ADR 0008] and [ADR 0010].
 Supersedes the equal-cwd exception recorded in [#640] and generalizes it into one rule for every layer Pi resolves per session.
 
 The mechanism below is unchanged: a child still inherits the identity region and nothing after it.
 [ADR 0008] amends what that placement *guarantees* — shared parts rather than shared bytes, scoped to hosts that reuse a prefix over the system text independently of the tool definitions — after [#890] found that an extension narrowing the `Available tools:` listing inside this region ended the shared prefix at offset 171.
+[ADR 0010] amends where the region *ends* for one population: `<project_context>` names each context file by absolute path, so a child a `WorkspaceProvider` relocated cuts at that block instead and resolves its own ([#918]).
 
 ## Context
 
@@ -22,12 +23,13 @@ The reporter of [#180] measured 8,333 shared tokens costing roughly 40 seconds o
 What the placement overlooked is that the parent's *effective* prompt is not identity alone.
 Pi's `buildSystemPrompt` writes four regions and extensions append a fifth:
 
-| Region         | Content                                                                    | Written by                                                                |
-| -------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Identity       | preamble or `customPrompt`, tool snippets, guidelines, `<project_context>` | `buildSystemPrompt`                                                       |
-| Catalogue      | the skills heading and `<available_skills>` … `</available_skills>`        | `formatSkillsForPrompt`, gated on the session's tool set including `read` |
-| Footer         | `Current working directory: <cwd>`                                         | `buildSystemPrompt`, always last                                          |
-| Extension tail | further blocks                                                             | handlers returning `systemPrompt` from `before_agent_start`               |
+| Region          | Content                                                             | Written by                                                                |
+| --------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Identity        | preamble or `customPrompt`, tool snippets, guidelines               | `buildSystemPrompt`                                                       |
+| Project context | `<project_context>`, each file named by absolute path               | `buildSystemPrompt` ([ADR 0010]: directory-resolved, not identity)        |
+| Catalogue       | the skills heading and `<available_skills>` … `</available_skills>` | `formatSkillsForPrompt`, gated on the session's tool set including `read` |
+| Footer          | `Current working directory: <cwd>`                                  | `buildSystemPrompt`, always last                                          |
+| Extension tail  | further blocks                                                      | handlers returning `systemPrompt` from `before_agent_start`               |
 
 The last three are resolved against **one session**: its directory, its loaded skills, its bound extensions.
 The extension tail is resolved against one *turn* — Pi rebuilds it from the base prompt on every turn and applies it as a single-turn override.
@@ -99,6 +101,8 @@ Both anchors match whole lines, which keeps a footer naming a directory that mer
 [#801]: https://github.com/gotgenes/pi-packages/issues/801
 [#846]: https://github.com/gotgenes/pi-packages/issues/846
 [#890]: https://github.com/gotgenes/pi-packages/issues/890
+[#918]: https://github.com/gotgenes/pi-packages/issues/918
 [ADR 0008]: 0008-inherited-region-is-shared-parts.md
+[ADR 0010]: 0010-project-context-is-directory-resolved.md
 [#883]: https://github.com/gotgenes/pi-packages/issues/883
 [pi-claude-bridge#88]: https://github.com/elidickinson/pi-claude-bridge/issues/88

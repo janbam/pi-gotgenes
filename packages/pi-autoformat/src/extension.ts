@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  ToolCallEvent,
-  ToolResultEvent,
+import {
+  type ExtensionAPI,
+  type ExtensionContext,
+  getAgentDir,
+  type ToolCallEvent,
+  type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -621,8 +622,12 @@ export function createAutoformatExtension(
   pi: ExtensionAPI,
   dependencies: AutoformatExtensionDependencies = {},
 ): void {
+  // `getAgentDir()` is read inside the lambda rather than hoisted so the env
+  // is read only on the production path, and at session time rather than at
+  // extension-construction time.
   const loadConfig =
-    dependencies.loadConfig ?? ((cwd: string) => loadAutoformatConfig({ cwd }));
+    dependencies.loadConfig ??
+    ((cwd: string) => loadAutoformatConfig({ cwd, agentDir: getAgentDir() }));
   const createAutoformatter =
     dependencies.createAutoformatter ?? createDefaultAutoformatter;
   const reportFlushResult =

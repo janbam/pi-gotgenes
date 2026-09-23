@@ -191,7 +191,9 @@ export class Subagent {
 	canBeSteered(): boolean { return this.state.canBeSteered(); }
 	get maxTurns(): number | undefined { return this.execution.maxTurns; }
 
-	readonly abortController: AbortController;
+	private _abortController: AbortController;
+	/** Cancels whichever run is current. */
+	get abortController(): AbortController { return this._abortController; }
 	private _promise?: Promise<void>;
 	/** Handle on the agent's current run — the initial run, or the live resume that replaced it. */
 	get promise(): Promise<void> | undefined { return this._promise; }
@@ -338,7 +340,7 @@ export class Subagent {
 		this.state = init.state ?? new SubagentState();
 
 		// Abort controller — always created, never injected
-		this.abortController = new AbortController();
+		this._abortController = new AbortController();
 
 		// Execution machinery — a single mandatory collaborator
 		this.execution = init.execution;
@@ -363,6 +365,7 @@ export class Subagent {
 	 * captured internally).
 	 */
 	async run(): Promise<void> {
+		this._abortController = new AbortController();
 		this.markRunning(Date.now());
 		this.execution.observer?.onStarted?.(this);
 		this.listeners.wireSignal(this.execution.signal, () => this.abort());
@@ -513,8 +516,12 @@ export class Subagent {
 	 * The returned promise always resolves (errors are captured internally) and is
 	 * published as the `promise` getter, so waiters track the resume rather than
 	 * the settled handle of the original run.
-	 * The parent signal flows straight through to resumeTurnLoop — resume does not
-	 * route through this.abortController.
+	 *
+	 * A resume runs under the record's own controller, like the initial run: the
+	 * controller is reminted per run, so a record aborted on its original run does
+	 * not resume under a spent one. A caller's `signal` is wired to abort() rather
+	 * than forwarded to the turn loop, so both levers stop the same run and both
+	 * leave the record reading `stopped`.
 	 */
 	resume(prompt: string, signal?: AbortSignal): Promise<void> {
 		const subagentSession = this.subagentSession;
@@ -595,14 +602,17 @@ export class Subagent {
 
 	/** The resume body. Always resolves — errors terminate through failResume(). */
 	private async runResume(subagentSession: SubagentSession, prompt: string, signal?: AbortSignal): Promise<void> {
+		this._abortController = new AbortController();
+		// After resetForResume, which releases the previous run's listener handles.
 		this.resetForResume(Date.now());
+		this.listeners.wireSignal(signal, () => this.abort());
 		this.execution.observer?.onResumeStarted?.(this);
 		this.listeners.attachObserver(subscribeSubagentObserver(subagentSession, this.state, {
 			onCompact: (info) => this.execution.observer?.onCompacted?.(this, info),
 		}));
 
 		try {
-			this.completeResume(await subagentSession.resumeTurnLoop(prompt, signal));
+			this.completeResume(await subagentSession.resumeTurnLoop(prompt, this.abortController.signal));
 		} catch (err) {
 			this.failResume(err);
 		}
@@ -708,7 +718,9 @@ export class Subagent {
 	}
 
 	/**
-	 * Abort a running agent: fire AbortController and transition to stopped.
+	 * Abort a running agent: fire the current run's AbortController and transition
+	 * to stopped. The controller is reminted at the start of each run and resume,
+	 * so the lever always reaches whichever run is in flight.
 	 * Returns false if the agent is not running.
 	 * A still-queued agent is stopped via stopQueued(); its scheduled thunk
 	 * then no-ops on the queued-status guard.

@@ -1,9 +1,8 @@
 ---
 name: design-review
 description: |
-  Review a module's dependency and structural patterns for code smells.
-  Use when adding a parameter to a shared interface, when a dependency bag grows past 5 fields,
-  or when planning a refactoring that touches wiring between layers.
+  Load before adding a parameter to a shared interface, growing a dependency bag past five fields,
+  or planning a refactor that rewires layers: the dependency and encapsulation smell checklist.
 metadata:
   short-description: Structural design review for dependency and encapsulation smells
 ---
@@ -40,7 +39,7 @@ Ask:
   Those are missing intermediate abstractions (value objects or collaborator interfaces).
 
 Also flag **projection parameters**: when a function receives both `X` and `Y` and `X` is derivable from `Y` (a field or parse-product of it), drop `X` and read it from `Y` — the object that owns the data.
-Example: passing `command` alongside a `bashProgram` parsed *from* that command; give `BashProgram` a `commandText()` accessor instead (Refs #574).
+Example: passing `command` alongside a `bashProgram` parsed *from* that command; give `BashProgram` a `commandText()` accessor instead.
 
 ### 2. Law of Demeter violations
 

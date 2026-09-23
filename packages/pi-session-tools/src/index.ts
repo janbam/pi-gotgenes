@@ -7,7 +7,8 @@
  *   read_session — Read the current session's raw entries (survives compaction)
  *   read_parent_session — Read the parent session's entries from a subagent context
  *   read_session_file — Read an arbitrary session file's entries by path
- *   list_session_files — List a cwd's session files, newest first
+ *   list_session_files — List a cwd's session files, newest first, bounded by `limit`
+ *   list_subagent_sessions — List a session's subagent transcripts, newest first
  */
 
 import { join } from "node:path";
@@ -20,25 +21,41 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { selectEntries } from "./entry-selection.js";
 import {
   formatSummaryText,
   type SessionSummary,
   summarizeEntries,
 } from "./entry-summary.js";
 import { formatTranscript, type TranscriptEntry } from "./format-transcript.js";
-import { deriveParentSessionFile } from "./parent-session.js";
+import {
+  deriveParentSessionFile,
+  deriveSubagentSessionsDir,
+} from "./parent-session.js";
 import {
   deriveSessionsRoot,
   encodeCwdToSessionDirName,
   listSessionFiles,
   readSessionFileEntries,
+  sessionFileExists,
 } from "./session-file.js";
+import {
+  boundListingPaths,
+  DEFAULT_LIST_LIMIT,
+  formatListingSummary,
+  formatListingText,
+} from "./session-listing.js";
+import type { BranchMode } from "./session-tree.js";
+
+/** Shared description for the `branches` parameter on every transcript tool. */
+const BRANCHES_DESCRIPTION =
+  'Which branches to render. "live" (the default) follows the path from the session\'s newest entry back to the root and replaces each rewound stretch with a marker naming how many entries it omitted. "all" additionally renders those entries, bracketed by begin/end markers.';
 
 /** Discriminated union stored in tool `details` for the session-read and discovery tools. */
 type SessionToolDetails =
   | { kind: "transcript"; summary: SessionSummary }
   | { kind: "status"; message: string }
-  | { kind: "listing"; directory: string; count: number };
+  | { kind: "listing"; directory: string; count: number; shown: number };
 
 // ---- rendering helpers ----
 
@@ -48,7 +65,15 @@ type SessionToolDetails =
  */
 function formatCallText(
   label: string,
-  args: { types?: string[]; limit?: number; path?: string; cwd?: string },
+  args: {
+    types?: string[];
+    offset?: number;
+    limit?: number;
+    elide_user_text?: boolean;
+    branches?: string;
+    path?: string;
+    cwd?: string;
+  },
   theme: Theme,
 ): string {
   const hints: string[] = [];
@@ -56,7 +81,10 @@ function formatCallText(
   if (args.cwd) hints.push(`cwd: ${args.cwd}`);
   if (args.types && args.types.length > 0)
     hints.push(`types: [${args.types.join(", ")}]`);
+  if (args.offset != null) hints.push(`offset: ${args.offset}`);
   if (args.limit != null) hints.push(`limit: ${args.limit}`);
+  if (args.elide_user_text) hints.push("elide user text");
+  if (args.branches) hints.push(`branches: ${args.branches}`);
   const suffix = hints.length > 0 ? ` (${hints.join(", ")})` : "";
   return `${theme.fg("toolTitle", theme.bold(label))}${theme.fg("muted", suffix)}`;
 }
@@ -95,53 +123,86 @@ function formatResultText(
     return `${theme.fg("warning", "\u26a0")} ${theme.fg("muted", details.message)} ${hint}`;
   }
   if (details.kind === "listing") {
-    const count =
-      details.count === 1 ? "1 session file" : `${details.count} session files`;
-    return `${theme.fg("success", "\u2713")} ${theme.fg("muted", `${count} in ${details.directory}`)} ${hint}`;
+    const summary = formatListingSummary(
+      details.directory,
+      details.shown,
+      details.count,
+    );
+    return `${theme.fg("success", "\u2713")} ${theme.fg("muted", summary)} ${hint}`;
   }
   // kind === "transcript"
   return `${theme.fg("success", "\u2713")} ${theme.fg("muted", formatSummaryText(details.summary))} ${hint}`;
 }
 
-/**
- * Render the text body for `list_session_files`: the resolved directory,
- * then either the newest-first file listing or a "no files" message.
- */
-function renderListing(directory: string, files: string[]): string {
-  const header = `Session directory: ${directory}`;
-  if (files.length === 0) return `${header}\nNo session files found.`;
-  const countLine =
-    files.length === 1
-      ? "1 session file, newest first:"
-      : `${files.length} session files, newest first:`;
-  const fileLines = files.map((f) => `  ${f}`).join("\n");
-  return `${header}\n${countLine}\n${fileLines}`;
+/** The parameter surface every transcript-rendering tool shares. */
+interface TranscriptReadParams {
+  types?: string[];
+  offset?: number;
+  limit?: number;
+  elide_user_text?: boolean;
+  branches?: string;
 }
 
 /**
- * Filter entries by `types`, slice to the most recent `limit`, then summarize
- * and format the result. Shared by every tool that renders a transcript from
- * an entry array (`read_session`, `read_parent_session`, `read_session_file`).
+ * Select the entries the caller asked for, then summarize and format them.
+ * Shared by every tool that renders a transcript from an entry array
+ * (`read_session`, `read_parent_session`, `read_session_file`).
+ *
+ * `leafId` is the session's live leaf when the caller knows it; the file
+ * readers omit it, and the walk falls back to the last entry — the leaf Pi
+ * itself resumes into.
  */
 function buildTranscriptResult(
   allEntries: TranscriptEntry[],
-  params: { types?: string[]; limit?: number },
+  params: TranscriptReadParams,
+  leafId?: string | null,
 ): {
   content: [{ type: "text"; text: string }];
   details: SessionToolDetails;
 } {
-  let entries = allEntries;
-  if (params.types) {
-    const allowed = new Set(params.types);
-    entries = entries.filter((e) => allowed.has(e.type));
-  }
-  if (params.limit != null) {
-    entries = entries.slice(-params.limit);
-  }
+  // Anything but the literal "all" resolves to the safe default, so a mistyped
+  // parameter renders the live path rather than the branch it discarded.
+  const branches: BranchMode = params.branches === "all" ? "all" : "live";
+  const entries = selectEntries(allEntries, {
+    types: params.types,
+    offset: params.offset,
+    limit: params.limit,
+    branches,
+    leafId,
+  });
   const summary = summarizeEntries(entries);
+  const text = formatTranscript(entries, {
+    elideUserText: params.elide_user_text,
+  });
   return {
-    content: [{ type: "text", text: formatTranscript(entries) }],
+    content: [{ type: "text", text }],
     details: { kind: "transcript", summary },
+  };
+}
+
+/**
+ * Render a directory's session files as the tool's text body plus its
+ * `listing` details. Shared shape with `buildTranscriptResult`.
+ */
+function buildListingResult(
+  directory: string,
+  files: string[],
+  params: { limit?: number },
+): {
+  content: [{ type: "text"; text: string }];
+  details: SessionToolDetails;
+} {
+  const paths = boundListingPaths(files, params.limit ?? DEFAULT_LIST_LIMIT);
+  return {
+    content: [
+      { type: "text", text: formatListingText(directory, paths, files.length) },
+    ],
+    details: {
+      kind: "listing",
+      directory,
+      count: files.length,
+      shown: paths.length,
+    },
   };
 }
 
@@ -209,7 +270,8 @@ export default function sessionTools(pi: ExtensionAPI): void {
         "the full session history including messages, model changes, compaction events, and custom entries. " +
         "The transcript format shows numbered user/assistant turns, one-line tool call summaries with " +
         "correlated results, and metadata events (compaction, model changes). " +
-        "Tool result bodies, thinking content, and image data are omitted.",
+        "Tool result bodies, thinking content, and image data are omitted. " +
+        "A session that was rewound renders only the live path, with a marker naming what it omitted.",
       parameters: Type.Object({
         types: Type.Optional(
           Type.Array(
@@ -223,11 +285,28 @@ export default function sessionTools(pi: ExtensionAPI): void {
             },
           ),
         ),
+        offset: Type.Optional(
+          Type.Number({
+            minimum: 0,
+            description:
+              "Skip the most recent N entries (after type filtering) before applying `limit`. Page backward through a long session instead of re-reading its tail.",
+          }),
+        ),
         limit: Type.Optional(
           Type.Number({
+            minimum: 0,
             description:
-              "Return only the most recent N entries (after type filtering). When omitted, all matching entries are returned.",
+              "Return only the most recent N entries (after type filtering, and after `offset` when given). When omitted, all matching entries are returned.",
           }),
+        ),
+        elide_user_text: Type.Optional(
+          Type.Boolean({
+            description:
+              "Replace each user turn's body with a length placeholder, keeping turn numbering, [provider/model] labels, and tool-call lines. Use it when you need the shape of a session rather than its prompts.",
+          }),
+        ),
+        branches: Type.Optional(
+          Type.String({ description: BRANCHES_DESCRIPTION }),
         ),
       }),
       renderCall(args, theme, context) {
@@ -245,12 +324,16 @@ export default function sessionTools(pi: ExtensionAPI): void {
       // eslint-disable-next-line @typescript-eslint/require-await -- satisfies async tool interface; no actual async work
       async execute(
         _toolCallId: string,
-        params: { types?: string[]; limit?: number },
+        params: TranscriptReadParams,
         _signal: unknown,
         _onUpdate: unknown,
         ctx: ExtensionContext,
       ) {
-        return buildTranscriptResult(ctx.sessionManager.getEntries(), params);
+        return buildTranscriptResult(
+          ctx.sessionManager.getEntries(),
+          params,
+          ctx.sessionManager.getLeafId(),
+        );
       },
     }),
   );
@@ -264,6 +347,7 @@ export default function sessionTools(pi: ExtensionAPI): void {
         "Derives the parent session file from the subagent directory layout. " +
         "Returns a structured transcript with numbered user/assistant turns, one-line tool call summaries, " +
         "and metadata events. Tool result bodies, thinking content, and image data are omitted. " +
+        "A session that was rewound renders only the live path, with a marker naming what it omitted. " +
         "Returns an error if not running in a subagent context.",
       parameters: Type.Object({
         types: Type.Optional(
@@ -278,11 +362,28 @@ export default function sessionTools(pi: ExtensionAPI): void {
             },
           ),
         ),
+        offset: Type.Optional(
+          Type.Number({
+            minimum: 0,
+            description:
+              "Skip the most recent N entries (after type filtering) before applying `limit`.",
+          }),
+        ),
         limit: Type.Optional(
           Type.Number({
+            minimum: 0,
             description:
-              "Return only the most recent N entries (after type filtering).",
+              "Return only the most recent N entries (after type filtering, and after `offset` when given).",
           }),
+        ),
+        elide_user_text: Type.Optional(
+          Type.Boolean({
+            description:
+              "Replace each user turn's body with a length placeholder, keeping turn numbering, [provider/model] labels, and tool-call lines.",
+          }),
+        ),
+        branches: Type.Optional(
+          Type.String({ description: BRANCHES_DESCRIPTION }),
         ),
       }),
       renderCall(args, theme, context) {
@@ -300,7 +401,7 @@ export default function sessionTools(pi: ExtensionAPI): void {
       // eslint-disable-next-line @typescript-eslint/require-await -- satisfies async tool interface; no actual async work
       async execute(
         _toolCallId: string,
-        params: { types?: string[]; limit?: number },
+        params: TranscriptReadParams,
         _signal: unknown,
         _onUpdate: unknown,
         ctx: ExtensionContext,
@@ -353,6 +454,7 @@ export default function sessionTools(pi: ExtensionAPI): void {
         "read_session nor read_parent_session can reach. " +
         "Returns a structured transcript with numbered user/assistant turns, one-line tool call summaries, " +
         "and metadata events. Tool result bodies, thinking content, and image data are omitted. " +
+        "A session that was rewound renders only the live path, with a marker naming what it omitted. " +
         "Returns an error if the file does not exist.",
       parameters: Type.Object({
         path: Type.String({
@@ -370,11 +472,28 @@ export default function sessionTools(pi: ExtensionAPI): void {
             },
           ),
         ),
+        offset: Type.Optional(
+          Type.Number({
+            minimum: 0,
+            description:
+              "Skip the most recent N entries (after type filtering) before applying `limit`.",
+          }),
+        ),
         limit: Type.Optional(
           Type.Number({
+            minimum: 0,
             description:
-              "Return only the most recent N entries (after type filtering).",
+              "Return only the most recent N entries (after type filtering, and after `offset` when given).",
           }),
+        ),
+        elide_user_text: Type.Optional(
+          Type.Boolean({
+            description:
+              "Replace each user turn's body with a length placeholder, keeping turn numbering, [provider/model] labels, and tool-call lines.",
+          }),
+        ),
+        branches: Type.Optional(
+          Type.String({ description: BRANCHES_DESCRIPTION }),
         ),
       }),
       renderCall(args, theme, context) {
@@ -392,7 +511,7 @@ export default function sessionTools(pi: ExtensionAPI): void {
       // eslint-disable-next-line @typescript-eslint/require-await -- satisfies async tool interface; no actual async work
       async execute(
         _toolCallId: string,
-        params: { path: string; types?: string[]; limit?: number },
+        params: TranscriptReadParams & { path: string },
       ) {
         const allEntries = readSessionFileEntries(params.path);
         if (!allEntries) {
@@ -424,12 +543,19 @@ export default function sessionTools(pi: ExtensionAPI): void {
         "Encodes the given cwd to Pi's session-directory naming convention and lists the " +
         ".jsonl files found there, so a caller does not have to hand-roll the encoding. " +
         "Pass the returned path to read_session_file to render one as a transcript. " +
-        "Useful for locating a sibling session (e.g. a peer worktree session).",
+        "Useful for locating a sibling session (e.g. a peer worktree session). " +
+        `Lists at most ${DEFAULT_LIST_LIMIT} paths unless limit says otherwise; ` +
+        "the count line always reports the directory's true total.",
       parameters: Type.Object({
         cwd: Type.String({
           description:
             "The working directory whose session files to list (e.g. a peer worktree path).",
         }),
+        limit: Type.Optional(
+          Type.Number({
+            description: `Maximum number of paths to list, newest first. Defaults to ${DEFAULT_LIST_LIMIT}; pass a large number (e.g. 1000) to list every file.`,
+          }),
+        ),
       }),
       renderCall(args, theme, context) {
         const text =
@@ -446,7 +572,7 @@ export default function sessionTools(pi: ExtensionAPI): void {
       // eslint-disable-next-line @typescript-eslint/require-await -- satisfies async tool interface; no actual async work
       async execute(
         _toolCallId: string,
-        params: { cwd: string },
+        params: { cwd: string; limit?: number },
         _signal: unknown,
         _onUpdate: unknown,
         ctx: ExtensionContext,
@@ -456,15 +582,76 @@ export default function sessionTools(pi: ExtensionAPI): void {
           process.cwd(),
         );
         const directory = join(root, encodeCwdToSessionDirName(params.cwd));
-        const files = listSessionFiles(directory);
-        return {
-          content: [{ type: "text", text: renderListing(directory, files) }],
-          details: {
-            kind: "listing",
-            directory,
-            count: files.length,
-          } as SessionToolDetails,
-        };
+        return buildListingResult(
+          directory,
+          listSessionFiles(directory),
+          params,
+        );
+      },
+    }),
+  );
+
+  pi.registerTool(
+    defineTool({
+      name: "list_subagent_sessions",
+      label: "List Subagent Sessions",
+      description:
+        "List a session's subagent transcripts, newest first. " +
+        "Pi stores each subagent session beneath the parent session file's basename " +
+        "(<session>/tasks/*.jsonl), so list_session_files — which reads one directory " +
+        "and does not recurse — never reports them. " +
+        "Pass the parent session's .jsonl path; render a returned path with read_session_file. " +
+        `Lists at most ${DEFAULT_LIST_LIMIT} paths unless limit says otherwise; ` +
+        "the count line always reports the directory's true total.",
+      parameters: Type.Object({
+        path: Type.String({
+          description:
+            "Absolute path to the session JSONL file whose subagent transcripts to list.",
+        }),
+        limit: Type.Optional(
+          Type.Number({
+            description: `Maximum number of paths to list, newest first. Defaults to ${DEFAULT_LIST_LIMIT}; pass a large number (e.g. 1000) to list every file.`,
+          }),
+        ),
+      }),
+      renderCall(args, theme, context) {
+        const text =
+          (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        text.setText(formatCallText("list subagent sessions", args, theme));
+        return text;
+      },
+      renderResult(result, options, theme, context) {
+        const text =
+          (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        text.setText(formatResultText(result, options, theme));
+        return text;
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- satisfies async tool interface; no actual async work
+      async execute(
+        _toolCallId: string,
+        params: { path: string; limit?: number },
+      ) {
+        if (!sessionFileExists(params.path)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Session file not found: ${params.path}`,
+              },
+            ],
+            details: {
+              kind: "status",
+              message: `Session file not found: ${params.path}`,
+            } as SessionToolDetails,
+          };
+        }
+
+        const directory = deriveSubagentSessionsDir(params.path);
+        return buildListingResult(
+          directory,
+          listSessionFiles(directory),
+          params,
+        );
       },
     }),
   );

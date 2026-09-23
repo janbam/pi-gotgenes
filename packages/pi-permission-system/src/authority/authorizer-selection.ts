@@ -7,6 +7,7 @@ import {
   selectAuthorizer,
 } from "./authorizer";
 import { composeAuthorizerChain } from "./authorizer-chain";
+import type { UnregisteredLinkAuditor } from "./authorizer-chain-audit";
 import type { AuthorizerLookup } from "./authorizer-registry";
 import { encloseInDelegationEnvelope } from "./delegation-envelope";
 import type { PermissionPromptDecision } from "./permission-dialog";
@@ -62,6 +63,28 @@ export interface AdjudicationRole {
 }
 
 /**
+ * Everything {@link AuthorizerSelection} is constructed with: the
+ * {@link AuthorizerSelectionDeps} `selectAuthorizer` itself needs, plus the
+ * collaborators only the class uses to resolve and run the chain.
+ *
+ * Named rather than left anonymous on the constructor because the test
+ * fixtures mirror it: an addition here is otherwise an addition in two places.
+ * `selectAuthorizer` keeps the narrower parameter type (ISP) — it resolves no
+ * links and must not see the chain collaborators.
+ */
+export type AuthorizerSelectionConstructorDeps = AuthorizerSelectionDeps & {
+  prompter: PermissionPrompterApi;
+  /** The session-scoped query injected into each chain link (ADR 0007 §3). */
+  getPermissionQuery: () => PermissionQuery;
+  /** Read-only lookup of registered links by name. */
+  authorizerRegistry: AuthorizerLookup;
+  /** The operator's configured link names, read live per ask. */
+  getAuthorizerChain: () => string[];
+  /** Told about each configured name the registry could not resolve. */
+  chainAudit: UnregisteredLinkAuditor;
+};
+
+/**
  * Context-owning selection root for the Authorizer spine.
  *
  * The rewrite of `PromptingGateway`: owns the stored `ExtensionContext`, runs
@@ -79,17 +102,7 @@ export class AuthorizerSelection
   private authority: SelectedAuthority | null = null;
   private relayTarget: PermissionForwardingTarget | null = null;
 
-  constructor(
-    private readonly deps: AuthorizerSelectionDeps & {
-      prompter: PermissionPrompterApi;
-      /** The session-scoped query injected into each chain link (ADR 0007 §3). */
-      getPermissionQuery: () => PermissionQuery;
-      /** Read-only lookup of registered links by name. */
-      authorizerRegistry: AuthorizerLookup;
-      /** The operator's configured link names, read live per ask. */
-      getAuthorizerChain: () => string[];
-    },
-  ) {}
+  constructor(private readonly deps: AuthorizerSelectionConstructorDeps) {}
 
   /**
    * Select the live authority for `ctx` and store it. The non-terminal
@@ -165,10 +178,11 @@ export class AuthorizerSelection
 
   /**
    * Resolve the operator's `authorizerChain` names to registered links, in
-   * config order (ADR 0007 invariant 1). An unregistered name is skipped with a
-   * warning (invariant 2 — more prompting, never less); each resolved link is
-   * wrapped in the bounded-delegation envelope so an `allow` on an excluded
-   * surface cannot exceed the operator's policy.
+   * config order (ADR 0007 invariant 1). An unregistered name is skipped
+   * fail-safe (invariant 2 — more prompting, never less) and handed to the
+   * chain audit, which records it and tells the operator once per name; each
+   * resolved link is wrapped in the bounded-delegation envelope so an `allow`
+   * on an excluded surface cannot exceed the operator's policy.
    *
    * The resolved names are recorded against the ask before any link runs — a
    * link that defers decides nothing and would otherwise leave no evidence it
@@ -184,10 +198,7 @@ export class AuthorizerSelection
     for (const name of configured) {
       const authorize = this.deps.authorizerRegistry.get(name);
       if (authorize === undefined) {
-        this.deps.logger.review("authorizer_chain_unregistered_link", {
-          requestId,
-          name,
-        });
+        this.deps.chainAudit.auditUnregisteredLink({ requestId, name });
         continue;
       }
       resolved.push(name);

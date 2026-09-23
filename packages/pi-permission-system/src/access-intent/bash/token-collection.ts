@@ -36,10 +36,11 @@ export interface PathToken {
  * {@link SKIP_SUBTREE_TYPES} check: `heredoc_body` is in both sets, and the
  * host reading is the one that must win.
  *
- * For commands in `PATTERN_FIRST_COMMANDS`, uses position-based
- * argument skipping to avoid collecting inline patterns/scripts
- * as path candidates. For all other commands, collects all
- * arguments generically.
+ * For commands in `PATTERN_FIRST_COMMANDS`, uses position- and role-based
+ * argument skipping to avoid collecting inline patterns/scripts as path
+ * candidates — a leading pattern positional for a matching tool, a
+ * `script`-role flag's argument for an interpreter. For all other commands,
+ * collects all arguments generically.
  */
 export function collectPathCandidateTokens(node: TSNode): PathToken[] {
   if (node.type === "command") return collectCommandTokens(node);
@@ -129,7 +130,9 @@ export function collectRedirectTokens(node: TSNode): PathToken[] {
  * execution contexts, reading none of the host subtree's own text.
  *
  * This is what lets a heredoc body contribute its substitution's operands while
- * its prose stays out of the path surface entirely.
+ * its prose stays out of the path surface entirely, and an argument node
+ * contribute its quoted substitution's operands while its own text is judged
+ * by whatever role its walker gave it (#945).
  *
  * `node` may be a context outright (`> $(cmd)`) or merely contain one
  * (`> ${DIR}/$(cmd)`), so the traversal is the root-inclusive
@@ -497,19 +500,124 @@ const SD_CONFIG: PatternCommandConfig = {
 };
 
 /**
- * Commands whose first N positional arguments are inline patterns/scripts,
- * not filesystem paths. The map stores per-command flag configuration so
- * the walker can correctly identify which arguments are consumed by flags
- * vs. which are positional.
+ * An interpreter takes its inline script from a flag and never from a leading
+ * positional, so `patternPositionals: 0` — `node build.js /tmp/x` names two
+ * real operands and no script.
+ *
+ * Verified by execution on macOS, 2026-09-20, node v26.9.0: `node -e`,
+ * `node --eval`, `node --eval='…'`, `node -p '1+1'` — `2`, and
+ * `node --print '2+2'` — `4` all run their argument as the program.
+ * `node -p t.js` evaluates `t.js` as *source* rather than running the file
+ * (`[eval]:1 / t.js / ^`), so `-p` consumes its argument unconditionally.
+ */
+const NODE_CONFIG: PatternCommandConfig = {
+  flags: new Map<string, PatternFlagRole>([
+    ["-e", "script"],
+    ["--eval", "script"],
+    ["-p", "script"],
+    ["--print", "script"],
+  ]),
+  patternPositionals: 0,
+};
+
+/**
+ * `bun` asserts the same four spellings as `node` and gets its own object
+ * rather than sharing one, because the table's rule is a shared *parser* and
+ * not a shared spelling — the two are different binaries (#823).
+ *
+ * Verified by execution, bun 1.4.2: `bun -e`, `bun --eval`, `bun -p '1+1'`
+ * — `2`, `bun --print '3+3'` — `6`; `bun -p` with no value errors
+ * `The argument '-p' requires a value but none was supplied.`, so it consumes
+ * unconditionally.
+ */
+const BUN_CONFIG: PatternCommandConfig = {
+  flags: new Map<string, PatternFlagRole>([
+    ["-e", "script"],
+    ["--eval", "script"],
+    ["-p", "script"],
+    ["--print", "script"],
+  ]),
+  patternPositionals: 0,
+};
+
+/**
+ * `python` and `python3` share one object because they are the same
+ * interpreter family: every implementation either name reaches is a
+ * CPython-compatible front end where `-c` takes the following argument.
+ *
+ * Verified by execution, python3 3.14.7: `python3 -c 'print("PC-OK")'`, and
+ * `python3 -cu 'print("x")'` raises from `File "<string>", line 1` — the
+ * glued `u` is evaluated as the script, which is the getopt semantics the
+ * existing glued-value rule already models. No `python` binary exists on the
+ * authoring host, so its row rests on the family argument rather than a run.
+ */
+const PYTHON_CONFIG: PatternCommandConfig = {
+  flags: new Map<string, PatternFlagRole>([["-c", "script"]]),
+  patternPositionals: 0,
+};
+
+/**
+ * Verified by execution, perl 5.34.1: `perl -e 'print "PE-OK\n"'` and
+ * `perl -E 'say "PE2-OK"'`; `perl -e` with nothing after it errors
+ * `No code specified for -e.`, so both consume unconditionally.
+ *
+ * `-p` and `-n` are deliberately absent. They take no argument of their own,
+ * and the cluster spelling that carries the script (`perl -pe 's|a|b|'`) is
+ * looked up as `-p` by the glued rule's `text.slice(0, 2)` — so listing `-p`
+ * would consume the following word on the *separated* spelling too and drop a
+ * real operand, the direction ADR 0009 forbids.
+ */
+const PERL_CONFIG: PatternCommandConfig = {
+  flags: new Map<string, PatternFlagRole>([
+    ["-e", "script"],
+    ["-E", "script"],
+  ]),
+  patternPositionals: 0,
+};
+
+/**
+ * Verified by execution, ruby 4.0.7: `ruby -e 'puts "RE-OK"'`.
+ *
+ * `-E` is deliberately **not** listed, though `perl` lists it: on `ruby` it is
+ * `--encoding`, not a script flag. `ruby -E utf-8 -e 'puts "RE2-OK"'` runs,
+ * proving `-E` consumed `utf-8` and left the script to `-e`. Leaving it
+ * unlisted over-surfaces `utf-8` as a token that names nothing, which the
+ * existence probe discards — the recoverable direction.
+ */
+const RUBY_CONFIG: PatternCommandConfig = {
+  flags: new Map<string, PatternFlagRole>([["-e", "script"]]),
+  patternPositionals: 0,
+};
+
+/**
+ * Commands whose leading positional arguments are inline patterns/scripts
+ * rather than filesystem paths, and commands whose inline script arrives
+ * through a flag. The map stores per-command flag configuration so the walker
+ * can identify which arguments a flag consumes and which are positional.
+ *
+ * Two classes share the table because they share the question. A pattern-first
+ * *matching* tool (`sed`, `grep`, `rg`) leads with a pattern and skips one or
+ * two positionals; an **interpreter** (`node`, `bun`, `python`, `perl`,
+ * `ruby`) leads with nothing and skips none, so its script can only ever
+ * arrive through a `script`-role flag and a script *file* stays an operand
+ * (#863).
  *
  * Names share a configuration object only when they share a *parser*, which is
  * narrower than being aliases: `egrep`/`fgrep` are the same binary as `grep`
  * here, and `nawk` is one-true-awk like `awk` — but `gawk` has its own config,
  * because it is the only one of the three that certainly means GNU awk and so
  * the only one whose long options certainly consume (#823).
+ * `node` and `bun` split for the same reason from the other direction: they
+ * assert identical spellings and are different binaries.
  */
 const PATTERN_FIRST_COMMANDS: ReadonlyMap<string, PatternCommandConfig> =
   new Map([
+    ["node", NODE_CONFIG],
+    ["bun", BUN_CONFIG],
+    ["python", PYTHON_CONFIG],
+    ["python3", PYTHON_CONFIG],
+    ["perl", PERL_CONFIG],
+    ["ruby", RUBY_CONFIG],
     ["sed", SED_CONFIG],
     ["awk", AWK_CONFIG],
     ["gawk", GAWK_CONFIG],
@@ -616,6 +724,15 @@ function collectPatternCommandTokens(
 
     const isArgNode = ARG_NODE_TYPES.has(child.type);
     const text = resolveNodeText(child);
+
+    // An argument is read for its text below, and its text alone — but a
+    // quoted substitution sitting there really runs, and its own operands are
+    // candidates wherever it sits (ADR 0009's positional invariance). The
+    // unquoted spelling reaches the nested command through the `!isArgNode`
+    // recursions below; the quoted one parses as a `string` and would
+    // otherwise stop here, whichever role the argument turns out to have
+    // (#945).
+    if (isArgNode) tokens.push(...collectHostedExecutionTokens(child));
 
     // Handle the argument a previous flag consumed. The consumption discharges
     // on whatever node type follows, not only on an ARG_NODE_TYPES one: a bare
@@ -771,6 +888,13 @@ function collectGenericCommandTokens(
       tokens.push(...collectHostedExecutionTokens(child));
       continue;
     }
+
+    // Read for its text below — but a quoted substitution among these
+    // arguments really runs, and its own operands are candidates wherever it
+    // sits (ADR 0009's positional invariance, #945). The unquoted spelling
+    // reaches the nested command through the trailing recursion.
+    if (ARG_NODE_TYPES.has(child.type))
+      tokens.push(...collectHostedExecutionTokens(child));
 
     // If there was no explicit command_name node, the first word-like
     // child is the command name itself — skip it.

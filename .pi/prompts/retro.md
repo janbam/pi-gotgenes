@@ -1,6 +1,6 @@
 ---
 description: Review this session for workflow improvements and persist retro notes to the package's docs/retro/
-model: anthropic/claude-opus-5
+model: anthropic/claude-opus-5-5
 ---
 
 # Review session and persist retro notes
@@ -29,6 +29,7 @@ Skip any already in this session's context — the trunk flow runs planning, imp
 - Load the `package-<PKG>` skill (e.g., `package-pi-permission-system`) for package-specific architecture, priorities, and testing context.
 - Load the `markdown-conventions` skill for writing the retro file.
 - Load the `code-design` skill if proposing code-related adjustments to prompts or `AGENTS.md`.
+- Load the `clarification-gates` skill before the `ask_user` gate on proposed changes, and the `git-workflow` skill before the retro commit.
 
 ## Session naming
 
@@ -97,10 +98,13 @@ Skip a lens entirely when it finds nothing notable.
 
 1. **Model-performance correlation** — for each subagent dispatch (if any), note which model ran and what task it performed.
    Flag quality mismatches: a reasoning-weak model on judgment-heavy work (architecture decisions, code review), or a high-cost model on purely mechanical work (formatting, simple grep).
-   If the `read_session`, `read_parent_session`, or `read_session_file` tools are available, use them to inspect model assignments: attribute each turn to the inline `[provider/model]` label the transcript renders on it.
-   Attribute each turn from the inline `[provider/model]` label in an **unfiltered** `read_session` call.
-   A `types: ["model_change"]`-filtered call bypasses that suppression and renders phantom switches that never ran a turn (Refs #737).
+   If the `read_session`, `read_parent_session`, or `read_session_file` tools are available, attribute each turn from the inline `[provider/model]` label the transcript renders on it, in a **type-unfiltered** call.
+   A `types: ["model_change"]`-filtered call bypasses phantom-switch suppression and renders switches that never ran a turn (Refs #737).
+   `offset` and `elide_user_text` are not type filters and are the intended way to run this lens on a long multi-stage session: page backward with `{ limit: N }` then `{ offset: N, limit: N }` rather than re-requesting a larger window, and set `elide_user_text: true` to drop prompt bodies the lens never reads while keeping every label (Refs #940).
+   A rewound session renders only its live path, so the turns the lens counts are the ones that survived; an `[abandoned branch] N entries omitted` line marks each stretch that did not, and `branches: "all"` renders it when the abandoned attempt is itself the subject (Refs #944).
+   `[session] → <name>` lines mark the stage boundaries to attribute each run of turns to.
    `pi-session-tools` is this repo's own tooling for exactly this — use `read_session`/`read_session_file`, not `jq` over `$PI_SESSION_FILE`, and never `PI_MODEL`/`PI_PROVIDER`, which report only the session's *current* model and invent an attribution when extrapolated across stages (Refs #778).
+   A subagent's turns live in its own transcript, which `list_subagent_sessions({ path })` finds for a given session file and `read_session_file({ path })` renders — attribute a subagent's model from that transcript rather than from its agent definition, which records the model it was configured with and not the one that ran (Refs #943).
 2. **Escalation-delay tracking** — for each `rabbit-hole` friction point, count how many consecutive tool calls the agent spent on the same error or approach before resolving or changing strategy.
    Flag sequences longer than 5 consecutive tool calls on the same error as "should have dispatched an Explore or Plan subagent" or "should have asked the user."
 3. **Unused-tool detection** — for each `rabbit-hole` or `missing-context` friction point, check whether a subagent type or tool was available that could have helped but was never dispatched.
@@ -188,7 +192,11 @@ The skill exits at its first step when no phase is open.
 Retro-driven additions to `AGENTS.md` and prompt bodies should land as **rule + tight example**, not **rule + rationale + worked example**.
 The retro file is the right home for rationale and worked examples.
 
-Before landing any change, ask:
+First, put each proposed `AGENTS.md` addition through the `## Admission test` in `AGENTS.md`.
+A passage that fails its first question is not landed anywhere; one that fails its second is landed in the named skill's body instead.
+This retro is where `AGENTS.md` grows — 44 of its last 60 commits were `docs(retro):` — so this is the gate that decides whether the file re-grows.
+
+Then, for what passes, ask:
 
 1. **Rationale placement** — is the *why* in the retro file, or has it leaked into `AGENTS.md`/prompt?
    If the latter, move it back and leave a one-clause justification (or a `Refs #N` pointer).
@@ -229,5 +237,5 @@ If neither the roadmap nor the triage queues anything, say so explicitly.
 - Be conservative — only propose changes clearly justified by evidence in this session.
 - Be specific — provide exact proposed text, not vague suggestions.
 - Look for removals alongside additions.
-- Don't duplicate — check whether a rule already exists in `AGENTS.md` or a prompt before adding.
+- Don't duplicate — check whether a rule already exists in `AGENTS.md`, a skill, or a prompt before adding, and apply the `AGENTS.md` admission test to decide which of those it belongs in.
 - Do not edit `CHANGELOG.md` — the release workflow owns it.

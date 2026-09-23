@@ -479,6 +479,28 @@ describe("BashProgram", () => {
       });
     });
 
+    describe("operands of a command hosted in a quoted argument (#945)", () => {
+      it("flags the operand of a substitution in a consumed flag argument", async () => {
+        const program = await BashProgram.parse(
+          'sed -e "$(cat /etc/shadow)" f.txt',
+          normalizer,
+        );
+        expect(
+          program.externalAccesses().map(({ path }) => path.value()),
+        ).toEqual(["/etc/shadow"]);
+      });
+
+      it("flags the operand of a substitution in a generic command's argument", async () => {
+        const program = await BashProgram.parse(
+          'echo "$(cat /etc/shadow)"',
+          normalizer,
+        );
+        expect(
+          program.externalAccesses().map(({ path }) => path.value()),
+        ).toEqual(["/etc/shadow"]);
+      });
+    });
+
     describe("glob-bearing path tokens (#821)", () => {
       it.each([
         ["a bracket glob", "cat /etc/[p]asswd", "/etc/[p]asswd"],
@@ -1852,6 +1874,7 @@ describe("BashProgram", () => {
         expect(program.commands()).toEqual([
           { text: "git add -A .", parseUnresolved: true },
           { text: "git commit -F", parseUnresolved: true },
+          { text: "rm -rf /tmp/x", parseUnresolved: true, salvaged: true },
         ]);
       });
 
@@ -1879,6 +1902,62 @@ describe("BashProgram", () => {
         for (const unit of program.commands()) {
           expect(unit.parseUnresolved).toBeUndefined();
         }
+      });
+    });
+
+    describe("a command the parse dropped entirely (#875)", () => {
+      it("enumerates the piped command the recovery left in no unit", async () => {
+        // Before the salvage this command enumerated `git add -A .` and
+        // `git commit -F` only, so `bash: {"rm -rf *": "deny"}` was never
+        // evaluated against a command `bash -n` accepts and the shell runs.
+        const program = await BashProgram.parse(
+          "git add -A . && git commit -F - <<'MSG' 2>&1 | rm -rf /tmp/x\nmsg\nMSG",
+          normalizer,
+        );
+        expect(program.commands()).toContainEqual({
+          text: "rm -rf /tmp/x",
+          parseUnresolved: true,
+          salvaged: true,
+        });
+      });
+
+      it("appends the salvaged unit after the units the primary parse produced", async () => {
+        const program = await BashProgram.parse(
+          "cat <<'MSG' 2>&1 | tail -4\nmsg\nMSG",
+          normalizer,
+        );
+        expect(program.commands()).toEqual([
+          { text: "cat", parseUnresolved: true },
+          { text: "tail -4", parseUnresolved: true, salvaged: true },
+        ]);
+      });
+
+      it("flags a salvaged indirection wrapper like any other", async () => {
+        // The salvaged root goes through the ordinary enumeration, so the
+        // wrapper floor reaches it without a second vocabulary.
+        const program = await BashProgram.parse(
+          "cat <<'MSG' 2>&1 | sudo rm -rf /\nmsg\nMSG",
+          normalizer,
+        );
+        expect(program.commands()).toEqual([
+          { text: "cat", parseUnresolved: true },
+          {
+            text: "sudo rm -rf /",
+            wrapperKind: "indirection",
+            executedUnit: "rm -rf /",
+            parseUnresolved: true,
+            salvaged: true,
+          },
+        ]);
+      });
+
+      it("salvages nothing from a region whose own re-parse fails", async () => {
+        // The `<>` shapes (#814): recovery's invented structure does not
+        // re-parse, so no fragment is admitted as a command.
+        const program = await BashProgram.parse("cat <> rw.txt", normalizer);
+        expect(program.commands()).toEqual([
+          { text: "cat", parseUnresolved: true },
+        ]);
       });
     });
   });
@@ -2088,6 +2167,153 @@ describe("BashProgram", () => {
           source: "core",
         });
       });
+    });
+  });
+
+  describe("path operands of a command the parse dropped (#875)", () => {
+    const cwd = "/projects/my-app";
+    const normalizer = new PathNormalizer(
+      pathFlavorForPlatform(process.platform),
+      cwd,
+    );
+
+    beforeEach(() => {
+      realpathSync.mockReset();
+      realpathSync.mockImplementation((p: string) => p);
+    });
+
+    it("projects the dropped command's operand as a rule candidate", async () => {
+      // Before the salvage this reached neither path surface at all, so ADR
+      // 0009's completeness contract was broken rather than residual.
+      const program = await BashProgram.parse(
+        "cat <<'MSG' 2>&1 | cat /etc/shadow\nmsg\nMSG",
+        normalizer,
+      );
+      expect(program.pathRuleCandidates().map(({ token }) => token)).toEqual([
+        "/etc/shadow",
+      ]);
+    });
+
+    it("flags the dropped command's operand as an external access", async () => {
+      const program = await BashProgram.parse(
+        "cat <<'MSG' 2>&1 | cat /etc/shadow\nmsg\nMSG",
+        normalizer,
+      );
+      expect(
+        program.externalAccesses().map(({ path }) => path.value()),
+      ).toEqual(["/etc/shadow"]);
+    });
+
+    it("carries the effect the dropped command's own word proves", async () => {
+      const program = await BashProgram.parse(
+        "cat <<'MSG' 2>&1 | cat /etc/shadow\nmsg\nMSG",
+        normalizer,
+      );
+      expect(program.pathRuleCandidates()[0].effect).toEqual({
+        effect: "read",
+        source: "core",
+      });
+    });
+
+    it("folds a path the primary parse already named", async () => {
+      // The salvaged candidates join the primary ones before projection, so
+      // the existing dedup sees both and the prompt shows one entry.
+      const program = await BashProgram.parse(
+        "cat /etc/hosts <<'MSG' 2>&1 | cat /etc/hosts\nmsg\nMSG",
+        normalizer,
+      );
+      expect(program.externalAccesses()).toHaveLength(1);
+      expect(program.pathRuleCandidates()).toHaveLength(1);
+    });
+
+    it("keeps a relative operand literal rather than resolving it against the cwd", async () => {
+      // The salvaged fragment carries no record of the `cd` in force where it
+      // sat, so resolving `../secret` against the session cwd would name
+      // `/projects/secret` — a different file than the one that runs, which a
+      // rule for that other path could then allow. #393's unknown base
+      // declines the claim instead and keeps the token as typed.
+      const program = await BashProgram.parse(
+        "cd /outside && cat <<'MSG' 2>&1 | cat ../secret\nmsg\nMSG",
+        normalizer,
+      );
+      const candidate = program
+        .pathRuleCandidates()
+        .find(({ token }) => token === "../secret");
+      expect(candidate?.path.matchValues()).toEqual(["../secret"]);
+    });
+
+    it("leaves a cleanly-parsed command's slices untouched", async () => {
+      const program = await BashProgram.parse(
+        "cat .env /etc/hosts",
+        normalizer,
+      );
+      expect(program.pathRuleCandidates().map(({ token }) => token)).toEqual([
+        ".env",
+        "/etc/hosts",
+      ]);
+    });
+  });
+
+  describe("an interpreter's inline script (#863)", () => {
+    const cwd = "/projects/my-app";
+    const normalizer = new PathNormalizer(
+      pathFlavorForPlatform(process.platform),
+      cwd,
+    );
+
+    /** The issue's reported command, abbreviated but structurally intact. */
+    const reportedCommand = [
+      'node -e "',
+      "// check which packages are installed",
+      "const fs = require('fs');",
+      "for (const pkg of ['pkg-a','pkg-b']) {",
+      "  try { console.log(pkg, require.resolve(pkg + '/package.json')); } catch { console.log(pkg, '(not installed)'); }",
+      "}",
+      '"',
+    ].join("\n");
+
+    beforeEach(() => {
+      realpathSync.mockReset();
+      realpathSync.mockImplementation((p: string) => p);
+    });
+
+    it("raises no external access for the reported command", async () => {
+      const program = await BashProgram.parse(reportedCommand, normalizer);
+      expect(program.externalAccesses()).toEqual([]);
+    });
+
+    it("offers no rule candidate for the reported command", async () => {
+      // The issue reports only the external_directory ask, but the same token
+      // reached the broader `path` surface too, because it contains `/`.
+      const program = await BashProgram.parse(reportedCommand, normalizer);
+      expect(program.pathRuleCandidates()).toEqual([]);
+    });
+
+    it("still enumerates the invocation for the bash surface", async () => {
+      // The command enumerator is a separate walker; `bash:` rules govern the
+      // interpreter invocation exactly as before.
+      const program = await BashProgram.parse('node -e "// x"', normalizer);
+      expect(program.commands()).toEqual([{ text: 'node -e "// x"' }]);
+    });
+
+    it("still projects a script-hosted command's operand", async () => {
+      const program = await BashProgram.parse(
+        'node -e "$(cat /etc/shadow)"',
+        normalizer,
+      );
+      expect(
+        program.externalAccesses().map(({ path }) => path.value()),
+      ).toEqual(["/etc/shadow"]);
+    });
+
+    it("still flags a script file's operand outside the tree", async () => {
+      const program = await BashProgram.parse(
+        "node build.js /etc/passwd",
+        normalizer,
+      );
+      expect(
+        program.externalAccesses().map(({ path }) => path.value()),
+      ).toEqual(["/etc/passwd"]);
     });
   });
 });

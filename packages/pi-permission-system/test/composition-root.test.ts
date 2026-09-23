@@ -29,6 +29,7 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { unregisteredLinkMessage } from "#src/authority/authorizer-chain-audit";
 import { childNodeAbsentMessage } from "#src/authority/child-node-audit";
 import {
   createPermissionForwardingLocation,
@@ -47,6 +48,7 @@ import {
   REVIEW_LOG_FILENAME,
 } from "#src/config/config-paths";
 import { DEFAULT_EXTENSION_CONFIG } from "#src/config/extension-config";
+import { SESSION_ENDED_REASON } from "#src/handlers/lifecycle";
 import piPermissionSystemExtension from "#src/index";
 import { getPermissionsService } from "#src/service";
 import {
@@ -736,6 +738,38 @@ describe("shutdown teardown chain", () => {
 
     rmSync(cwd, { recursive: true, force: true });
   });
+
+  it("answers an unanswered ask when the session ends", async () => {
+    writeGlobalConfig({ permission: { "*": "allow", demo: "ask" } });
+
+    const cwd = mkdtempSync(join(tmpdir(), "pi-perm-release-cwd-"));
+    const pi = makeFakePi({ toolNames: ["demo"] });
+    piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+    // A human who never answers: the dialog stays open until the session ends.
+    const ctx = makeBaseCtx(cwd, "ui-session", {
+      select: () => new Promise<string | undefined>(() => undefined),
+    });
+    await fireSessionStart(pi, ctx);
+
+    const gated = pi.fire(
+      "tool_call",
+      { toolName: "demo", toolCallId: "demo-unanswered", input: {} },
+      ctx,
+    ) as Promise<{ block?: true; reason?: string }>;
+    await sleep(10);
+
+    await pi.fire("session_shutdown");
+
+    const result = await gated;
+    expect(result.block).toBe(true);
+    expect(result.reason).toContain(SESSION_ENDED_REASON);
+    // A user who was never asked denied nothing (#719): the refusal must not
+    // render through `renderUserDenial`.
+    expect(result.reason).not.toContain("The user denied");
+
+    rmSync(cwd, { recursive: true, force: true });
+  });
 });
 
 describe("service and gate share one formatter registry", () => {
@@ -988,8 +1022,8 @@ describe("fact-shaping inheritance stops at live authority", () => {
   // A link returns a verdict, so live authority converges at the adjudicating
   // node (ADR 0007 §7) and inheriting one would run authority the operator's
   // own exclusion removed. That a configured-but-absent link is skipped here
-  // rather than borrowed is deliberate; whether the skip should be louder is
-  // its own question, tracked as #861.
+  // rather than borrowed is deliberate — and since #861 the skip is no longer
+  // silent: the operator answering the ask is told once per configured name.
   it("does not resolve an authorizer registered only in the parent", async () => {
     writeGlobalConfig({
       permission: { "*": "ask" },
@@ -1026,11 +1060,13 @@ describe("fact-shaping inheritance stops at live authority", () => {
     // The child has UI and no serving parent, so it adjudicates locally and its
     // own chain runs — the one shape in which a missing link changes the verdict.
     const capturedTitles: string[] = [];
+    const notified: string[] = [];
     const childCtx = makeBaseCtx(childCwd, childSessionId, {
       select: async (title: string): Promise<string | undefined> => {
         capturedTitles.push(title);
         return "Yes";
       },
+      notify: (message: string) => notified.push(message),
     });
     await fireSessionStart(childPi, childCtx);
 
@@ -1056,6 +1092,9 @@ describe("fact-shaping inheritance stops at live authority", () => {
     expect(readReviewLog().map((entry) => entry.event)).toContain(
       "authorizer_chain_unregistered_link",
     );
+    // And the operator answering that prompt is told why no judge answered it:
+    // the review log alone left the skip invisible (#861).
+    expect(notified).toEqual([unregisteredLinkMessage("parent-only-judge")]);
 
     rmSync(parentCwd, { recursive: true, force: true });
     rmSync(childCwd, { recursive: true, force: true });
@@ -2103,5 +2142,241 @@ describe("directional external-directory relief (#806)", () => {
       const outcome = await runPathTool(bare, toolName, externalPath);
       expect(outcome.prompts).toHaveLength(1);
     }
+  });
+});
+
+describe("configured permission-dialog hotkeys reach the inline dialog", () => {
+  /**
+   * A TUI ctx whose `ui.custom` captures the dialog component.
+   *
+   * The composition root's other UI ctx drives the `select`/`input` fallback,
+   * which has no hotkeys at all — only `mode: "tui"` reaches the inline
+   * keybind dialog, which is where a configured binding is observable.
+   */
+  function makeTuiCtx(cwd: string): {
+    ctx: unknown;
+    render: () => string[];
+    press: (data: string) => void;
+    notified: string[];
+  } {
+    let component:
+      | { render(width: number): string[]; handleInput(data: string): void }
+      | undefined;
+    const notified: string[] = [];
+    const base = makeBaseCtx(cwd, "tui-session", {
+      notify: (message: string): void => {
+        notified.push(message);
+      },
+    }) as {
+      ui: Record<string, unknown>;
+    };
+    const ctx = {
+      ...base,
+      mode: "tui",
+      ui: {
+        ...base.ui,
+        getToolsExpanded: (): boolean => false,
+        setToolsExpanded: (): void => {},
+        custom: (
+          factory: (
+            tui: { requestRender: () => void },
+            theme: { fg(color: string, text: string): string },
+            keybindings: { matches(data: string, action: string): boolean },
+            done: (decision: unknown) => void,
+          ) => typeof component,
+        ): Promise<unknown> =>
+          new Promise((resolve) => {
+            component = factory(
+              { requestRender: (): void => {} },
+              { fg: (_color, text) => text },
+              { matches: () => false },
+              resolve,
+            );
+          }),
+      },
+    };
+    return {
+      ctx,
+      render: () => component?.render(80) ?? [],
+      press: (data) => {
+        component?.handleInput(data);
+      },
+      notified,
+    };
+  }
+
+  /** The hotkey each option row advertises, in rendered order. */
+  function optionKeys(lines: string[]): (string | undefined)[] {
+    return lines
+      .map((line) => /^[ \u25b6] \((\w)\) /.exec(line)?.[1])
+      .filter((key) => key !== undefined);
+  }
+
+  it("renders and honors the characters the config bound", async () => {
+    writeGlobalConfig({
+      permission: { "*": "allow", demo: "ask" },
+      permissionDialogKeys: {
+        approve: "1",
+        approveSession: "2",
+        deny: "4",
+        denyWithReason: "5",
+      },
+    });
+
+    const cwd = mkdtempSync(join(tmpdir(), "pi-perm-keys-cwd-"));
+    const pi = makeFakePi({ toolNames: ["demo"] });
+    piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+    const { ctx, render, press } = makeTuiCtx(cwd);
+    await fireSessionStart(pi, ctx);
+
+    const decision = pi.fire(
+      "tool_call",
+      { toolName: "demo", toolCallId: "keys-ask", input: {} },
+      ctx,
+    ) as Promise<{ block?: true }>;
+    await sleep(0);
+
+    expect(optionKeys(render())).toEqual(["1", "2", "4", "5"]);
+
+    // The default letter is no longer live; the configured one commits.
+    press("n");
+    press("n");
+    press("4");
+    press("4");
+    expect((await decision).block).toBe(true);
+
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("warns about a refused binding and leaves the policy alone", async () => {
+    writeGlobalConfig({
+      debugLog: true,
+      permission: { "*": "allow", demo: "ask" },
+      permissionDialogKeys: { deny: "j" },
+    });
+
+    const cwd = mkdtempSync(join(tmpdir(), "pi-perm-keys-bad-cwd-"));
+    const pi = makeFakePi({ toolNames: ["demo", "quiet"] });
+    piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+    const { ctx, render, press, notified } = makeTuiCtx(cwd);
+    await fireSessionStart(pi, ctx);
+
+    // The operator is told, in the session that has a UI to tell (#933).
+    expect(
+      notified.filter((message) =>
+        message.includes('permissionDialogKeys.deny: "j"'),
+      ),
+    ).toHaveLength(1);
+
+    // The scope was not rejected: `*: allow` still allows, so a tool the config
+    // does not name never prompts at all.
+    const allowed = (await pi.fire(
+      "tool_call",
+      { toolName: "quiet", toolCallId: "keys-allowed", input: {} },
+      ctx,
+    )) as { block?: true };
+    expect(allowed.block).toBeUndefined();
+
+    // And the refused decision kept its default letter.
+    const decision = pi.fire(
+      "tool_call",
+      { toolName: "demo", toolCallId: "keys-default", input: {} },
+      ctx,
+    ) as Promise<{ block?: true }>;
+    await sleep(0);
+    expect(optionKeys(render())).toEqual(["y", "s", "n", "r"]);
+    press("n");
+    press("n");
+    expect((await decision).block).toBe(true);
+
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  // #933: a config issue that exists before the session starts reached the
+  // debug log and nothing else, because the factory-time priming refresh
+  // recorded the warning as delivered while having no ctx to deliver it.
+  describe("a config issue present at session start", () => {
+    it("is shown by session_start alone, before the first turn", async () => {
+      // The shape `detectPermissiveBashFallback` exists to flag.
+      writeGlobalConfig({ permission: { "*": "allow" } });
+
+      const cwd = mkdtempSync(join(tmpdir(), "pi-perm-warn-start-cwd-"));
+      const pi = makeFakePi({ toolNames: ["demo"] });
+      piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+      // No before_agent_start: that fires when the operator submits a prompt,
+      // so session_start must carry the warning on its own.
+      const { ctx, notified } = makeTuiCtx(cwd);
+      await fireSessionStart(pi, ctx);
+
+      expect(
+        notified.filter((message) =>
+          message.includes("bash commands silently inherit 'allow'"),
+        ),
+      ).toHaveLength(1);
+
+      rmSync(cwd, { recursive: true, force: true });
+    });
+
+    it("is shown once, however many turns follow", async () => {
+      // The shape `detectPermissiveBashFallback` exists to flag.
+      writeGlobalConfig({ permission: { "*": "allow" } });
+
+      const cwd = mkdtempSync(join(tmpdir(), "pi-perm-warn-cwd-"));
+      const pi = makeFakePi({ toolNames: ["demo"] });
+      piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+      const { ctx, notified } = makeTuiCtx(cwd);
+      await fireSessionStart(pi, ctx);
+      await pi.fire(
+        "before_agent_start",
+        { systemPrompt: "", systemPromptOptions: { cwd } },
+        ctx,
+      );
+      await pi.fire(
+        "before_agent_start",
+        { systemPrompt: "", systemPromptOptions: { cwd } },
+        ctx,
+      );
+
+      expect(
+        notified.filter((message) =>
+          message.includes("bash commands silently inherit 'allow'"),
+        ),
+      ).toHaveLength(1);
+
+      rmSync(cwd, { recursive: true, force: true });
+    });
+
+    it("is shown on the next turn when it appears mid-session", async () => {
+      writeGlobalConfig({ permission: { "*": "ask" } });
+
+      const cwd = mkdtempSync(join(tmpdir(), "pi-perm-warn-mid-cwd-"));
+      const pi = makeFakePi({ toolNames: ["demo"] });
+      piPermissionSystemExtension(pi as unknown as ExtensionAPI);
+
+      const { ctx, notified } = makeTuiCtx(cwd);
+      await fireSessionStart(pi, ctx);
+      expect(notified).toEqual([]);
+
+      // The operator breaks their config while the session is live; it is
+      // re-read on every before_agent_start.
+      writeGlobalConfig({ permission: { "*": "allow" } });
+      await pi.fire(
+        "before_agent_start",
+        { systemPrompt: "", systemPromptOptions: { cwd } },
+        ctx,
+      );
+
+      expect(
+        notified.filter((message) =>
+          message.includes("bash commands silently inherit 'allow'"),
+        ),
+      ).toHaveLength(1);
+
+      rmSync(cwd, { recursive: true, force: true });
+    });
   });
 });

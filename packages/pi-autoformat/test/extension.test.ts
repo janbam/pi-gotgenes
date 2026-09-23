@@ -1,12 +1,17 @@
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
-import type { LoadConfigResult } from "#src/config-loader";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { getGlobalConfigPath, type LoadConfigResult } from "#src/config-loader";
 import {
   buildSteeringMessageContent,
   createAutoformatExtension,
   createDefaultAutoformatter,
 } from "#src/extension";
+import type { AutoformatConfig } from "#src/formatter-config";
 import { createFormatterConfig } from "#src/formatter-config";
 import type { PromptAutoformatterResult } from "#src/prompt-autoformatter";
 
@@ -1573,6 +1578,65 @@ describe("createAutoformatExtension", () => {
 
     expect(autoformatter.flushPrompt).toHaveBeenCalledTimes(1);
     // The second flush should produce an empty result
+  });
+
+  /**
+   * The production seam: `createAutoformatExtension` with no injected
+   * `loadConfig`, so the global scope is resolved the way it is in a real
+   * session.
+   */
+  describe("global config scope", () => {
+    // A value no real global config would carry, so the assertion below
+    // discriminates the temp scope from whatever sits at `~/.pi/agent`.
+    const SCOPED_TIMEOUT_MS = 424242;
+
+    let root: string;
+    let projectCwd: string;
+
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), "pi-autoformat-scope-"));
+      const agentDir = join(root, "agent");
+      projectCwd = join(root, "project");
+      mkdirSync(projectCwd, { recursive: true });
+
+      const globalConfigPath = getGlobalConfigPath(agentDir);
+      mkdirSync(dirname(globalConfigPath), { recursive: true });
+      writeFileSync(
+        globalConfigPath,
+        JSON.stringify({ commandTimeoutMs: SCOPED_TIMEOUT_MS }),
+      );
+      vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    it("reads the global config from the directory PI_CODING_AGENT_DIR names", async () => {
+      const pi = new TestPi();
+      const seenConfigs: AutoformatConfig[] = [];
+
+      createAutoformatExtension(pi.asExtensionAPI(), {
+        createAutoformatter: (_cwd: string, config: AutoformatConfig) => {
+          seenConfigs.push(config);
+          return {
+            recordToolResult: vi.fn(),
+            flushPrompt: vi.fn().mockResolvedValue(undefined),
+            addTouchedPath: vi.fn(),
+          };
+        },
+      });
+
+      await pi.emit("session_start", {}, createContext({ cwd: projectCwd }));
+
+      // Asserting on the loaded `commandTimeoutMs` — a value only the temp
+      // scope supplies — is what makes this a real red. Asserting that a
+      // config was loaded at all passes before the fix too, because an
+      // unfound global config degrades silently to the built-in defaults.
+      expect(seenConfigs).toHaveLength(1);
+      expect(seenConfigs[0]?.commandTimeoutMs).toBe(SCOPED_TIMEOUT_MS);
+    });
   });
 });
 

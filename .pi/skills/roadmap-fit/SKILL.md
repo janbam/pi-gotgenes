@@ -1,9 +1,8 @@
 ---
 name: roadmap-fit
 description: |
-  Evaluate a newly filed issue for fit with its package's open improvement phase
-  and record the operator's disposition in the roadmap's sweep list.
-  Load at the moment a session files a GitHub issue — during planning, implementation, or a retrospective.
+  Load at the moment a session files a GitHub issue: evaluate it against the package's open
+  improvement phase and record the operator's disposition in the roadmap's sweep list.
 ---
 
 # Skill: roadmap-fit
@@ -46,7 +45,7 @@ The decision is purely **where in the section order** the step goes — name the
 
 Put the proposal to the operator with `ask_user`: all four as options, yours marked `recommended: true` with the rationale in its description.
 The sweep list is user-decided by convention, and two of the four change the phase's scope.
-Do not skip the gate because "defer" looks obvious — a self-recorded defer is the failure this skill exists to prevent (Refs #753).
+Do not skip the gate because "defer" looks obvious — a self-recorded defer is the failure this skill exists to prevent.
 
 Recording a fold-in is not authorization to implement it now.
 The work still happens under the filed issue, on its own schedule.

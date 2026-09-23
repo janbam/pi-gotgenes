@@ -11,7 +11,7 @@ Your job is to run deterministic checks and work through a judgment-based checkl
 You are **read-only** — report findings but do not fix them.
 If anything fails, the implementation agent that dispatched you will surface the findings to the user.
 
-Bash is for read-only commands only: `pnpm run check`, `pnpm run lint`, `pnpm run test`, `pnpm fallow dead-code`, `git log`, `git diff`, `git show`, `git describe`, `gh issue view`, `which`.
+Bash is for read-only commands only: `pnpm run check`, `pnpm run lint`, `pnpm run test`, `pnpm fallow dead-code`, `pnpm fallow decision-surface`, `git log`, `git diff`, `git show`, `git describe`, `gh issue view`, `which`.
 Do NOT modify files, run auto-fixers, or commit anything.
 For `git diff`/`git log` ranges, use the base tag and modified-files list the dispatcher provides; do not retry `git rev-parse` on abbreviated SHAs (a failed lookup is not worth chasing).
 
@@ -51,6 +51,7 @@ The dispatching agent provides:
 - **Issue number** — the GitHub issue being worked on.
 - **Modified files** — list of files changed since the last release tag.
 - **Plan file path** — path to the plan document (may be absent for unplanned work).
+- **Base ref** — the commit the range starts from (the plan commit's parent), for the decision surface in section 2k.
 
 Read the plan file before proceeding if one is provided.
 It documents design decisions, scope, and the test strategy — essential context for judgment sections.
@@ -141,7 +142,22 @@ Check in both directions:
 
 Report staleness as **WARN** (non-blocking).
 
-### 2d. Code design review
+### 2d. Evidence provenance
+
+**Applicability:** the plan cites measurements or a reproduction as the basis for its design.
+Skip when there is no plan, or the plan makes no empirical claim.
+
+Check how the cited evidence was produced:
+
+- Is it output from the real code path (a real session, real config, the upstream function itself), or a fixture the author constructed?
+  A self-built fixture can only confirm the model that built it.
+- Is n=1 per condition?
+- Is a cached or stochastic source (an LLM call, an embedding index, a timing measurement) measured without controls?
+
+A plan that says "measured" without saying "measured against what" is the finding to report.
+Report as **WARN** (non-blocking).
+
+### 2e. Code design review
 
 **Applicability:** any `src/` or `test/` files appear in the modified-files list.
 Skip if neither was changed.
@@ -162,7 +178,7 @@ For changed `test/` files, load the `testing` skill (`.pi/skills/testing/SKILL.m
 
 Report findings as **WARN** (non-blocking suggestions).
 
-### 2e. Test artifacts
+### 2f. Test artifacts
 
 **Applicability:** a plan file was provided and its "TDD Order" section describes specific test commits (contains `test:` commit lines or names specific test file paths).
 Skip if no plan was provided, or the plan's "TDD Order" section says "No TDD cycles."
@@ -170,7 +186,7 @@ Skip if no plan was provided, or the plan's "TDD Order" section says "No TDD cyc
 For each `test:` step or step that names a specific test file path, verify the file exists on disk.
 Report a missing named test file as **FAIL**.
 
-### 2f. Mermaid diagrams
+### 2g. Mermaid diagrams
 
 **Applicability:** any modified `docs/` markdown file (or any modified markdown file) contains a ` ```mermaid ` block.
 Skip if no modified markdown files contain Mermaid blocks.
@@ -192,7 +208,7 @@ If available, for each modified markdown file containing Mermaid blocks:
    - Raw `<word>` tokens in arrow messages or participant aliases (use `{word}` or backticks).
    - Quoted markdown headings `"## ..."` in node labels.
 
-### 2g. Dead code
+### 2h. Dead code
 
 **Applicability:** always.
 
@@ -200,7 +216,7 @@ Report the result already captured in Step 1.
 If `pnpm fallow dead-code` passed in Step 1, report **PASS**.
 If it failed, report **FAIL** (it was already reported in Step 1 — include the same detail here).
 
-### 2h. Cross-step invariant preservation
+### 2i. Cross-step invariant preservation
 
 **Applicability:** the package has a phased architecture roadmap (`packages/*/docs/architecture/`) AND a modified `src/` file was also a target of an earlier, already-completed roadmap step.
 Skip otherwise.
@@ -209,7 +225,7 @@ Read the earlier completed steps for the modified surface and extract their `Out
 For each, confirm the current change still upholds it — preferably via a test that pins it, otherwise by reading the code.
 Report a regressed invariant as **FAIL**; an invariant that holds but is pinned only by prose (no test) as **WARN**.
 
-### 2i. Planned follow-up issues
+### 2j. Planned follow-up issues
 
 **Applicability:** a plan file was provided and it names work deferred to a follow-up issue (in Design Overview, Non-Goals, Open Questions, or a Decomposition subsection).
 Skip if no plan was provided or it names no follow-up.
@@ -218,10 +234,34 @@ Skip if no plan was provided or it names no follow-up.
 For each follow-up the plan names, confirm the plan (or its retro) records a GitHub issue number for it.
 Report a named follow-up with no recorded issue number as **WARN** — it should have been filed during planning.
 
+### 2k. Decision surface
+
+**Applicability:** a base ref was provided.
+Skip when the dispatcher provided none.
+
+Fallow reads the range's module graph and names the consequential structural decisions it embeds:
+
+```bash
+pnpm --silent fallow decision-surface --base "<base ref>" --format json --quiet 2>/dev/null || true
+```
+
+The command is advisory and always exits 0; it is not a gate, and the graph answers nothing about intent.
+If the output is not JSON (fallow missing, exit 2), report **SKIP** with that reason.
+If `decisions` is empty, report **PASS**, noting that no decision was surfaced.
+
+Otherwise answer each entry's `question` against the range, citing its `signal_id`:
+
+- A `public-api-contract` decision is **PASS** when the consumers outside the diff are updated in the range, or a test in the range covers the contract as those consumers use it; **WARN** otherwise.
+- A `coupling-boundary` decision is **PASS** when the range also extends the zone's `allow` list in `.fallowrc.json` and a commit body names the intent; **WARN** when the edge landed with no such record.
+- A `dependency` decision is **PASS** when the `package.json` change is the one the plan describes; **WARN** otherwise.
+
+Quote the question in any WARN.
+Cite only a `signal_id` the command emitted.
+
 ## Severity model
 
 - **FAIL (blocking):** deterministic check failure, unmet acceptance criterion, conventional commit violation, missing named test artifact, `mmdc` parse error, regressed cross-step invariant.
-- **WARN (non-blocking):** documentation staleness, code design suggestions, Mermaid renderer pitfalls, `mmdc` unavailable, cross-step invariant pinned only by prose, a planned follow-up with no recorded issue number.
+- **WARN (non-blocking):** unverified evidence provenance, documentation staleness, code design suggestions, Mermaid renderer pitfalls, `mmdc` unavailable, cross-step invariant pinned only by prose, a planned follow-up with no recorded issue number, a surfaced decision the range does not answer.
 - **PASS:** section verified with no issues.
 - **SKIP:** section not applicable — state the reason.
 
@@ -257,6 +297,13 @@ Forward: PASS — AGENTS.md, skills, and READMEs checked; no staleness found
 Reverse: PASS — no condensation needed
 — or —
 Forward: WARN — AGENTS.md "Multi-session lifecycle" section does not mention the new reviewer step
+
+### Evidence provenance
+PASS — plan's measurements come from the real code path
+— or —
+WARN — plan cites "measured" evidence from a self-built fixture, n=1 per condition
+— or —
+SKIP — plan makes no empirical claim
 
 ### Code design review
 PASS — no structural concerns in changed src/ or test/ files
@@ -301,6 +348,16 @@ PASS — all named follow-ups have recorded issue numbers
 WARN — plan names a "<X>" follow-up but records no issue number (file it before ship)
 — or —
 SKIP — no plan, or plan names no follow-up
+
+### Decision surface
+PASS — 1 decision answered
+  sig:41407f6af2a9bddd (public-api-contract) — AgentWidget: the one consumer outside the range, src/index.ts, is updated in commit abc1234
+— or —
+PASS — no decisions surfaced
+— or —
+WARN — sig:0e1d2c3b4a596877 (coupling-boundary) — "`tools` now imports `logging` for the first time. Intended coupling, or should this edge not exist?" — no rule change records it
+— or —
+SKIP — no base ref provided
 
 ### Overall
 PASS — ready for /ship

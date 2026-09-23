@@ -3,7 +3,8 @@
   "entry": [
     "packages/*/src/extension.ts",
     "packages/*/src/index.ts",
-    "packages/*/src/service.ts"
+    "packages/*/src/service.ts",
+    "scripts/**/*.mjs"
   ],
   "ignoreExportsUsedInFile": true,
   "ignoreDependencies": ["tree-sitter-bash", "@gotgenes/pi-subagents"],
@@ -27,6 +28,245 @@
     "unresolved-imports": "error",
     "unused-dev-dependencies": "error",
     "dev-dependencies-in-production": "error",
-    "stale-suppressions": "error"
+    "stale-suppressions": "error",
+    "boundary-violation": "warn"
+  },
+  "boundaries": {
+    "zones": [
+      {
+        "name": "pi-subagents",
+        "autoDiscover": ["packages/pi-subagents/src"]
+      },
+      {
+        "name": "pi-subagents/core",
+        "patterns": ["packages/pi-subagents/src/*.ts"]
+      },
+      {
+        "name": "pi-permission-system",
+        "autoDiscover": ["packages/pi-permission-system/src"]
+      },
+      {
+        "name": "pi-permission-system/core",
+        "patterns": ["packages/pi-permission-system/src/*.ts"]
+      }
+    ],
+    "rules": [
+      {
+        "from": "pi-subagents/config",
+        "allow": ["pi-subagents/core"]
+      },
+      {
+        "from": "pi-subagents/handlers",
+        "allow": ["pi-subagents/core"]
+      },
+      {
+        "from": "pi-subagents/lifecycle",
+        "allow": [
+          "pi-subagents/config",
+          "pi-subagents/core",
+          "pi-subagents/observation",
+          "pi-subagents/session"
+        ]
+      },
+      {
+        "from": "pi-subagents/observation",
+        "allow": [
+          "pi-subagents/core",
+          "pi-subagents/lifecycle",
+          "pi-subagents/ui"
+        ]
+      },
+      {
+        "from": "pi-subagents/service",
+        "allow": [
+          "pi-subagents/config",
+          "pi-subagents/core",
+          "pi-subagents/lifecycle",
+          "pi-subagents/session"
+        ]
+      },
+      {
+        "from": "pi-subagents/session",
+        "allow": ["pi-subagents/config", "pi-subagents/core"]
+      },
+      {
+        "from": "pi-subagents/tools",
+        "allow": [
+          "pi-subagents/config",
+          "pi-subagents/core",
+          "pi-subagents/lifecycle",
+          "pi-subagents/observation",
+          "pi-subagents/session",
+          "pi-subagents/ui"
+        ]
+      },
+      {
+        "from": "pi-subagents/ui",
+        "allow": [
+          "pi-subagents/config",
+          "pi-subagents/core",
+          "pi-subagents/lifecycle"
+        ]
+      },
+      {
+        "from": "pi-subagents/core",
+        "allow": [
+          "pi-subagents/config",
+          "pi-subagents/handlers",
+          "pi-subagents/lifecycle",
+          "pi-subagents/observation",
+          "pi-subagents/service",
+          "pi-subagents/session",
+          "pi-subagents/tools",
+          "pi-subagents/ui"
+        ]
+      },
+      {
+        "from": "pi-permission-system/access-intent",
+        "allow": [
+          "pi-permission-system/config",
+          "pi-permission-system/core",
+          "pi-permission-system/path",
+          "pi-permission-system/tool-input"
+        ]
+      },
+      {
+        "from": "pi-permission-system/authority",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/config",
+          "pi-permission-system/core",
+          "pi-permission-system/logging",
+          "pi-permission-system/path",
+          "pi-permission-system/presentation",
+          "pi-permission-system/service",
+          "pi-permission-system/session",
+          "pi-permission-system/tool-input"
+        ]
+      },
+      {
+        "from": "pi-permission-system/config",
+        "allow": [
+          "pi-permission-system/core",
+          "pi-permission-system/logging",
+          "pi-permission-system/path",
+          "pi-permission-system/policy"
+        ]
+      },
+      {
+        "from": "pi-permission-system/exposure",
+        "allow": ["pi-permission-system/core", "pi-permission-system/path"]
+      },
+      {
+        "from": "pi-permission-system/handlers",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/authority",
+          "pi-permission-system/config",
+          "pi-permission-system/core",
+          "pi-permission-system/exposure",
+          "pi-permission-system/logging",
+          "pi-permission-system/path",
+          "pi-permission-system/policy",
+          "pi-permission-system/presentation",
+          "pi-permission-system/service",
+          "pi-permission-system/session",
+          "pi-permission-system/tool-input"
+        ]
+      },
+      {
+        "from": "pi-permission-system/logging",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/config",
+          "pi-permission-system/core",
+          "pi-permission-system/service"
+        ]
+      },
+      {
+        "from": "pi-permission-system/path",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/policy"
+        ]
+      },
+      {
+        "from": "pi-permission-system/policy",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/config",
+          "pi-permission-system/core",
+          "pi-permission-system/path"
+        ],
+        "allowTypeOnly": [
+          "pi-permission-system/authority",
+          "pi-permission-system/exposure",
+          "pi-permission-system/session"
+        ]
+      },
+      {
+        "from": "pi-permission-system/presentation",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/authority",
+          "pi-permission-system/config",
+          "pi-permission-system/core",
+          "pi-permission-system/exposure",
+          "pi-permission-system/session",
+          "pi-permission-system/tool-input"
+        ]
+      },
+      {
+        "from": "pi-permission-system/service",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/authority",
+          "pi-permission-system/core",
+          "pi-permission-system/handlers",
+          "pi-permission-system/path",
+          "pi-permission-system/policy",
+          "pi-permission-system/presentation",
+          "pi-permission-system/session",
+          "pi-permission-system/tool-input"
+        ]
+      },
+      {
+        "from": "pi-permission-system/session",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/authority",
+          "pi-permission-system/config",
+          "pi-permission-system/exposure",
+          "pi-permission-system/handlers",
+          "pi-permission-system/path",
+          "pi-permission-system/policy",
+          "pi-permission-system/tool-input"
+        ]
+      },
+      {
+        "from": "pi-permission-system/tool-input",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/core",
+          "pi-permission-system/logging"
+        ]
+      },
+      {
+        "from": "pi-permission-system/core",
+        "allow": [
+          "pi-permission-system/access-intent",
+          "pi-permission-system/authority",
+          "pi-permission-system/config",
+          "pi-permission-system/handlers",
+          "pi-permission-system/logging",
+          "pi-permission-system/path",
+          "pi-permission-system/policy",
+          "pi-permission-system/presentation",
+          "pi-permission-system/service",
+          "pi-permission-system/session",
+          "pi-permission-system/tool-input"
+        ]
+      }
+    ]
   }
 }

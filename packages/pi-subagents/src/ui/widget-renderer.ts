@@ -123,8 +123,33 @@ export function renderRunningLines(
 
 // ── Full widget rendering ────────────────────────────────────────────────────
 
-/** Maximum number of rendered lines before overflow collapse kicks in. */
+/** Ceiling on rendered lines, however tall the terminal. */
 const MAX_WIDGET_LINES = 12;
+/** Floor on rendered lines: below this the widget stops reading as a widget. */
+const MIN_WIDGET_LINES = 3;
+/**
+ * Dock rows below the widget that the budget must leave alone: Pi's editor plus
+ * its footer, measured at 5 (3 + 2) against pi-tui 0.84.4 and reserved at 6 so a
+ * taller editor still leaves the widget's first animated line inside the
+ * viewport. Pi's differential renderer full-clears the screen and the scrollback
+ * whenever the first changed line sits above the previous viewport top, and the
+ * widget's spinner is that line on every tick (#864).
+ */
+const DOCK_LINES_BELOW_WIDGET = 6;
+
+/**
+ * Lines the widget may render at this terminal height, heading included.
+ *
+ * A pane shorter than the floor plus the reserved dock cannot be made safe by
+ * any widget height, so the floor is where the bound stops helping rather than a
+ * guarantee.
+ */
+export function widgetLineBudget(terminalRows: number): number {
+	return Math.max(
+		MIN_WIDGET_LINES,
+		Math.min(MAX_WIDGET_LINES, terminalRows - DOCK_LINES_BELOW_WIDGET),
+	);
+}
 
 interface AgentCategories {
 	running: WidgetAgent[];
@@ -151,6 +176,8 @@ interface WidgetSections {
 	finishedLines: string[];
 	runningLines: [string, string][];
 	queuedLine: string | undefined;
+	/** Agents behind `queuedLine`, which collapses all of them into one row. */
+	queuedCount: number;
 }
 
 /** Render each agent bucket into pre-formatted lines with ├─ tree connectors. */
@@ -179,11 +206,11 @@ function buildSections(
 		? truncate(theme.fg("dim", "\u251C\u2500") + ` ${theme.fg("muted", GLYPHS.queued)} ${theme.fg("dim", `${categories.queued.length} queued`)}`)
 		: undefined;
 
-	return { finishedLines, runningLines, queuedLine };
+	return { finishedLines, runningLines, queuedLine, queuedCount: categories.queued.length };
 }
 
 /**
- * Assemble widget lines when total body fits within MAX_WIDGET_LINES.
+ * Assemble widget lines when the total body fits within the height budget.
  * Fixes the last tree connector: ├─ → └─, and │ → space for the running-agent activity line.
  */
 function assembleWithinBudget(heading: string, sections: WidgetSections): string[] {
@@ -207,7 +234,7 @@ function assembleWithinBudget(heading: string, sections: WidgetSections): string
 }
 
 /**
- * Assemble widget lines when total body exceeds MAX_WIDGET_LINES.
+ * Assemble widget lines when the total body exceeds the height budget.
  * Prioritizes running > queued > finished and appends an overflow indicator.
  */
 function assembleOverflow(
@@ -217,10 +244,11 @@ function assembleOverflow(
 	truncate: (line: string) => string,
 	theme: Theme,
 ): string[] {
-	const { finishedLines, runningLines, queuedLine } = sections;
+	const { finishedLines, runningLines, queuedLine, queuedCount } = sections;
 	const lines: string[] = [heading];
 	let budget = maxBody - 1;
 	let hiddenRunning = 0;
+	let hiddenQueued = 0;
 	let hiddenFinished = 0;
 
 	for (const pair of runningLines) {
@@ -232,9 +260,15 @@ function assembleOverflow(
 		}
 	}
 
-	if (queuedLine && budget >= 1) {
-		lines.push(queuedLine);
-		budget--;
+	if (queuedLine) {
+		if (budget >= 1) {
+			lines.push(queuedLine);
+			budget--;
+		} else {
+			// The line is one row but stands for every queued agent, so dropping it
+			// hides all of them.
+			hiddenQueued = queuedCount;
+		}
 	}
 
 	for (const fl of finishedLines) {
@@ -248,9 +282,11 @@ function assembleOverflow(
 
 	const overflowParts: string[] = [];
 	if (hiddenRunning > 0) overflowParts.push(`${hiddenRunning} running`);
+	if (hiddenQueued > 0) overflowParts.push(`${hiddenQueued} queued`);
 	if (hiddenFinished > 0) overflowParts.push(`${hiddenFinished} finished`);
 	const overflowText = overflowParts.join(", ");
-	lines.push(truncate(theme.fg("dim", "\u2514\u2500") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`));
+	const hiddenTotal = hiddenRunning + hiddenQueued + hiddenFinished;
+	lines.push(truncate(theme.fg("dim", "\u2514\u2500") + ` ${theme.fg("dim", `+${hiddenTotal} more (${overflowText})`)}`));
 	return lines;
 }
 
@@ -260,10 +296,11 @@ export function renderWidgetLines(params: {
 	registry: AgentConfigLookup;
 	spinnerFrame: number;
 	terminalWidth: number;
+	terminalHeight: number;
 	theme: Theme;
 	shouldShowFinished: (agentId: string, status: string) => boolean;
 }): string[] {
-	const { agents, registry, spinnerFrame, terminalWidth, theme, shouldShowFinished } = params;
+	const { agents, registry, spinnerFrame, terminalWidth, terminalHeight, theme, shouldShowFinished } = params;
 
 	const { running, queued, finished } = categorizeAgents(agents, shouldShowFinished);
 
@@ -285,12 +322,13 @@ export function renderWidgetLines(params: {
 	);
 
 	// Assemble with overflow cap (heading takes 1 line).
-	const maxBody = MAX_WIDGET_LINES - 1;
+	const maxBody = widgetLineBudget(terminalHeight) - 1;
 	const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
 	const heading = truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"));
 
+	const sections = { finishedLines, runningLines, queuedLine, queuedCount: queued.length };
 	if (totalBody <= maxBody) {
-		return assembleWithinBudget(heading, { finishedLines, runningLines, queuedLine });
+		return assembleWithinBudget(heading, sections);
 	}
-	return assembleOverflow(heading, { finishedLines, runningLines, queuedLine }, maxBody, truncate, theme);
+	return assembleOverflow(heading, sections, maxBody, truncate, theme);
 }

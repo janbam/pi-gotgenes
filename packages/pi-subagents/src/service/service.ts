@@ -89,8 +89,9 @@ export interface ResumeOptions {
    */
   claimOutcome?: boolean;
   /**
-   * Cancels the resumed turn loop. `abort(id)` does not reach it: a resume does
-   * not run under the record's own abort controller.
+   * Cancels the resumed turn loop. It is wired through the record's own lever,
+   * so it ends the resume exactly as `abort(id)` does — the record reads
+   * `stopped`, and either cancel reaches the same run.
    */
   signal?: AbortSignal;
 }

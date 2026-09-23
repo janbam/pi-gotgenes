@@ -52,7 +52,7 @@ export function assembleWidgetState(
 
 /** The slice of the TUI the widget factory callback touches. */
 export interface TuiSurface {
-  readonly terminal: { readonly columns: number };
+  readonly terminal: { readonly columns: number; readonly rows: number };
   requestRender(): void;
 }
 
@@ -64,6 +64,16 @@ export type UICtx = {
     options?: { placement?: "aboveEditor" | "belowEditor" },
   ): void;
 };
+
+/**
+ * How often the widget re-renders while a subagent animates.
+ *
+ * Pi renders the entire regular-mode component tree per request, and the widget
+ * is the only thing requesting one while the parent idles, so this is the
+ * cadence of that whole-tree walk. Deliberately slower than Pi's own `Loader`
+ * default, which pays 80 ms only during a turn the user is already watching.
+ */
+const WIDGET_UPDATE_INTERVAL_MS = 250;
 
 // ---- Widget manager ----
 
@@ -115,14 +125,14 @@ export class AgentWidget implements SubagentManagerObserver {
 
   // ---- SubagentManagerObserver: react to lifecycle, self-drive the timer ----
 
-  /** A subagent started running — ensure the update loop is live and render. */
+  /** A subagent started running — render, which arms the animation loop. */
   onSubagentStarted(_record: Subagent) {
-    this.startLoop();
+    this.update();
   }
 
-  /** A background subagent was created (queued) — ensure the loop is live and render. */
+  /** A background subagent was created (queued) — render so the count shows. */
   onSubagentCreated(_record: Subagent) {
-    this.startLoop();
+    this.update();
   }
 
   /** A subagent completed — render so the finished state is seeded and shown. */
@@ -130,13 +140,9 @@ export class AgentWidget implements SubagentManagerObserver {
     this.update();
   }
 
-  /**
-   * A subagent went back to running — ensure the loop is live and render.
-   * `startLoop` rather than `update`: the timer stops once nothing is running,
-   * and a resumed agent is running again.
-   */
+  /** A subagent went back to running — render, which re-arms the animation loop. */
   onSubagentResuming(_record: Subagent) {
-    this.startLoop();
+    this.update();
   }
 
   /** A subagent finished a resume — render so the refreshed result is shown. */
@@ -149,15 +155,19 @@ export class AgentWidget implements SubagentManagerObserver {
     this.update();
   }
 
-  /** Start the update timer (if not already running) and render immediately. */
-  private startLoop() {
-    this.ensureTimer();
-    this.update();
-  }
-
-  /** Ensure the widget update timer is running. */
-  private ensureTimer() {
-    this.widgetInterval ??= setInterval(() => this.update(), 80);
+  /**
+   * Single owner of the animation timer's existence. Idempotent in both
+   * directions, so a caller states the wanted state rather than checking first.
+   */
+  private setTimerRunning(shouldRun: boolean): void {
+    if (shouldRun) {
+      this.widgetInterval ??= setInterval(() => this.update(), WIDGET_UPDATE_INTERVAL_MS);
+      return;
+    }
+    if (this.widgetInterval) {
+      clearInterval(this.widgetInterval);
+      this.widgetInterval = undefined;
+    }
   }
 
   /** Check if a finished agent should still be shown in the widget. */
@@ -209,6 +219,7 @@ export class AgentWidget implements SubagentManagerObserver {
       registry: this.registry,
       spinnerFrame: this.widgetFrame,
       terminalWidth: tui.terminal.columns,
+      terminalHeight: tui.terminal.rows,
       theme,
       shouldShowFinished: (id, status) => this.shouldShowFinished(id, status),
     });
@@ -229,7 +240,7 @@ export class AgentWidget implements SubagentManagerObserver {
       this.uiCtx!.setStatus("subagents", undefined);
       this.lastStatusText = undefined;
     }
-    if (this.widgetInterval) { clearInterval(this.widgetInterval); this.widgetInterval = undefined; }
+    this.setTimerRunning(false);
     for (const [id] of this.finishedTurnAge) {
       if (!backgroundAgents.some(a => a.id === id)) this.finishedTurnAge.delete(id);
     }
@@ -282,6 +293,11 @@ export class AgentWidget implements SubagentManagerObserver {
       return;
     }
 
+    // Only a running agent has content that changes between ticks: a finished
+    // line's duration is fixed and the queued line is a count, so animating
+    // either would ask Pi to re-render its whole component tree for a
+    // byte-identical result.
+    this.setTimerRunning(state.runningCount > 0);
     this.updateStatusBar(state);
     this.widgetFrame++;
 
@@ -316,10 +332,7 @@ export class AgentWidget implements SubagentManagerObserver {
    * `setUICtx()` re-arms the widget if a context ever arrives again.
    */
   dispose() {
-    if (this.widgetInterval) {
-      clearInterval(this.widgetInterval);
-      this.widgetInterval = undefined;
-    }
+    this.setTimerRunning(false);
     if (this.uiCtx) {
       this.uiCtx.setWidget("agents", undefined);
       this.uiCtx.setStatus("subagents", undefined);

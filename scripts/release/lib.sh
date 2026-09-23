@@ -68,8 +68,27 @@ cliff_args() {
 # released. `-v:refname` compares the embedded version numerically, so
 # `pi-subagents-v21.2.0` sorts above `pi-subagents-v9.0.0`; a lexical sort would
 # not.
+#
+# The count is applied inside git, with no pipe. The obvious spelling —
+# `git tag --list ... | head -1` — is a SIGPIPE race under `set -euo pipefail`:
+# `head` exits as soon as it has its line, and once a package's tag listing
+# exceeds one stdio buffer (4096 bytes) git needs a second flush, which then
+# lands on a closed pipe. git dies with SIGPIPE, `pipefail` promotes the 141,
+# and `set -e` aborts the caller — for `next-version.sh` that is an empty
+# version, and for `prepare-release.sh` a release that fails ~10ms in with no
+# diagnostic beyond `exit code 141`.
+#
+# It is a race, not a threshold, so it fails intermittently and then settles
+# into failing always: `pi-permission-system` crossed 4096 bytes at ~141 tags,
+# released four more times, and then could not release at all. Every other
+# package is still single-flush, which is why it presented as one package being
+# unreleasable.
+#
+# Keep this pipe-free. The `--count=1` is what makes it safe, not an
+# optimization.
 latest_tag() {
-  git tag --list "$1-v*" --sort=-v:refname | head -1
+  git for-each-ref --count=1 --sort=-v:refname \
+    --format='%(refname:strip=2)' "refs/tags/$1-v*"
 }
 
 # Print the version recorded in package $1's package.json.

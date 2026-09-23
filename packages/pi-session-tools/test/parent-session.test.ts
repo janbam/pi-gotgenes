@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { deriveParentSessionFile } from "#src/parent-session";
+import {
+  deriveParentSessionFile,
+  deriveSubagentSessionsDir,
+} from "#src/parent-session";
 
 describe("deriveParentSessionFile", () => {
   it("derives parent file from a subagent session path", () => {
@@ -32,5 +35,36 @@ describe("deriveParentSessionFile", () => {
     // tasks exists in the path but not as the immediate parent
     const sessionFile = "/sessions/tasks/subdir/session.jsonl";
     expect(deriveParentSessionFile(sessionFile)).toBeUndefined();
+  });
+});
+
+describe("deriveSubagentSessionsDir", () => {
+  it("derives the tasks directory from a session file path", () => {
+    const sessionFile =
+      "/home/user/.pi/agent/sessions/--project--/2026-05-20T12-00-00Z_.jsonl";
+    expect(deriveSubagentSessionsDir(sessionFile)).toBe(
+      "/home/user/.pi/agent/sessions/--project--/2026-05-20T12-00-00Z_/tasks",
+    );
+  });
+
+  it("nests one level further for a subagent session file", () => {
+    const sessionFile = "/sessions/parent/tasks/child.jsonl";
+    expect(deriveSubagentSessionsDir(sessionFile)).toBe(
+      "/sessions/parent/tasks/child/tasks",
+    );
+  });
+
+  it("inverts deriveParentSessionFile", () => {
+    const child = "/sessions/--project--/2026-05-20T12-00-00Z_/tasks/c.jsonl";
+    const parent = deriveParentSessionFile(child)!;
+    expect(deriveSubagentSessionsDir(parent)).toBe(
+      "/sessions/--project--/2026-05-20T12-00-00Z_/tasks",
+    );
+  });
+
+  it("keeps the basename intact when the path has no .jsonl suffix", () => {
+    expect(deriveSubagentSessionsDir("/sessions/--project--/s")).toBe(
+      "/sessions/--project--/s/tasks",
+    );
   });
 });

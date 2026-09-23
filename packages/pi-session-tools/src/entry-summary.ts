@@ -5,13 +5,14 @@
  * as a testable layer beneath the theme-coupled rendering in `index.ts`.
  */
 
-import {
-  collectEffectiveModelChangeIndices,
-  type TranscriptEntry,
-} from "./format-transcript.js";
+import type { TranscriptEntry } from "./format-transcript.js";
+import { BRANCH_MARKER_TYPE } from "./session-tree.js";
 
 export interface SessionSummary {
-  /** Total number of entries in the (already filtered/limited) array. */
+  /**
+   * Total number of session entries in the (already filtered/limited) array.
+   * Synthetic branch markers are not session entries and are not counted.
+   */
   totalEntries: number;
   /** user + assistant conversation turns. */
   messages: number;
@@ -19,7 +20,7 @@ export interface SessionSummary {
   toolCalls: number;
   /** Entries with `type: "compaction"`. */
   compactions: number;
-  /** `model_change` entries followed by an assistant turn (phantom switches excluded). */
+  /** Entries with `type: "model_change"`. */
   modelChanges: number;
 }
 
@@ -29,16 +30,23 @@ export interface SessionSummary {
  * apply `types`/`limit` itself.
  */
 export function summarizeEntries(entries: TranscriptEntry[]): SessionSummary {
+  let totalEntries = 0;
   let messages = 0;
   let toolCalls = 0;
   let compactions = 0;
+  let modelChanges = 0;
 
   for (const entry of entries) {
+    if (entry.type === BRANCH_MARKER_TYPE) continue;
+    totalEntries++;
     if (entry.type === "compaction") {
       compactions++;
       continue;
     }
-    if (entry.type === "model_change") continue;
+    if (entry.type === "model_change") {
+      modelChanges++;
+      continue;
+    }
     if (entry.type !== "message") continue;
 
     const e = entry as unknown as Record<string, unknown>;
@@ -67,11 +75,11 @@ export function summarizeEntries(entries: TranscriptEntry[]): SessionSummary {
   }
 
   return {
-    totalEntries: entries.length,
+    totalEntries,
     messages,
     toolCalls,
     compactions,
-    modelChanges: collectEffectiveModelChangeIndices(entries).size,
+    modelChanges,
   };
 }
 

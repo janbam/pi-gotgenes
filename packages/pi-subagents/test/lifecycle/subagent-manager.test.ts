@@ -309,7 +309,7 @@ describe("SubagentManager", () => {
       expect(restoreSubagentSession).toHaveBeenCalledOnce();
       expect(reopened.resumeTurnLoop).toHaveBeenCalledWith(
         "continue",
-        undefined,
+        hydrated.abortController.signal,
       );
       expect(hydrated.result).toBe("continued after reopen");
     });
@@ -2434,7 +2434,7 @@ describe("SubagentManager", () => {
         );
         expect(restored.resumeTurnLoop).toHaveBeenCalledWith(
           "continue",
-          undefined,
+          record.abortController.signal,
         );
       });
 
@@ -2514,7 +2514,7 @@ describe("SubagentManager", () => {
         expect(calls).toEqual(["resuming", "resumed"]);
       });
 
-      it("forwards the caller's signal to the resumed turn loop", async () => {
+      it("runs the resumed turn loop under the record's own lever", async () => {
         const { factory, stub } = createSessionFactory();
         stub.resumeTurnLoop.mockResolvedValue("second");
         ({ manager } = createManager({ createSubagentSession: factory }));
@@ -2524,7 +2524,34 @@ describe("SubagentManager", () => {
 
         await manager.resume(id, "continue", { signal });
 
-        expect(stub.resumeTurnLoop).toHaveBeenCalledWith("continue", signal);
+        // The caller's signal is wired through the record's abort(), so the loop
+        // runs under the one lever abort(id) can also pull.
+        expect(stub.resumeTurnLoop).toHaveBeenCalledWith("continue", manager.getRecord(id)!.abortController.signal);
+      });
+
+      it("stops an in-flight resume when the caller aborts it by id", async () => {
+        const { factory, stub } = createSessionFactory();
+        ({ manager } = createManager({ createSubagentSession: factory }));
+        const id = spawnBg(manager);
+        await manager.getRecord(id)!.promise;
+        const gate = Promise.withResolvers<string>();
+        let signalled = false;
+        stub.resumeTurnLoop.mockImplementation((_prompt: string, signal?: AbortSignal) => {
+          signal?.addEventListener("abort", () => {
+            signalled = true;
+            gate.resolve("partial answer");
+          });
+          return gate.promise;
+        });
+
+        const resumed = manager.resume(id, "continue");
+        await vi.waitFor(() => expect(stub.resumeTurnLoop).toHaveBeenCalled());
+
+        expect(manager.abort(id)).toBe(true);
+        await resumed;
+
+        expect(signalled).toBe(true);
+        expect(manager.getRecord(id)!.status).toBe("stopped");
       });
     });
   });

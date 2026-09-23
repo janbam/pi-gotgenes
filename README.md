@@ -65,14 +65,18 @@ pnpm install
 ```
 
 This installs dependencies and wires the `prek` git hooks automatically via the `prepare` script.
-The hooks include a `pre-commit` stage (Biome, ESLint, rumdl) and a `commit-msg` stage that validates Conventional Commit headers via [committed](https://github.com/crate-ci/committed).
+The hooks include a `pre-commit` stage (a stray-invisible-character check, Biome, ESLint, rumdl) and a `commit-msg` stage that validates Conventional Commit headers via [committed](https://github.com/crate-ci/committed).
+
+The invisible-character check rejects C0 control characters other than tab, line feed, and carriage return, plus DEL and the zero-width characters.
+It deletes the two whose only correct repair is deletion (the zero-width space and the byte order mark) and reports the rest, because repairing those needs the surrounding sentence.
+Run it directly with `node scripts/lint/invisible-characters.mjs [--fix] [paths...]`; with no paths it scans every tracked file.
 
 ### Commands
 
 ```bash
 pnpm run check    # typecheck all packages
 pnpm run test     # test all packages
-pnpm run lint     # biome + rumdl
+pnpm run lint     # biome + eslint + rumdl + invisible characters
 pnpm run lint:fix # auto-fix lint issues
 ```
 
@@ -217,11 +221,12 @@ Package-specific context (architecture, priorities, testing strategy) lives in s
 Load the relevant skill before working on a package:
 
 - `package-pi-autoformat` — for `packages/pi-autoformat/`
+- `package-pi-colgrep` — for `packages/pi-colgrep/`
 - `package-pi-github-tools` — for `packages/pi-github-tools/`
 - `package-pi-permission-system` — for `packages/pi-permission-system/`
 - `package-pi-subagents` — for `packages/pi-subagents/`
 
-The remaining packages (`pi-colgrep`, `pi-session-tools`, `pi-subagents-worktrees`, `pi-nocd`, `pi-permission-model-judge`) have no dedicated skill — their READMEs cover everything you need.
+The remaining packages (`pi-session-tools`, `pi-subagents-worktrees`, `pi-nocd`, `pi-permission-model-judge`) have no dedicated skill — their READMEs cover everything you need.
 
 ## License
 

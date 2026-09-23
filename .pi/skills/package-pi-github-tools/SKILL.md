@@ -39,7 +39,6 @@ src/
 - `ci_find` matches a run purely on `headSha` and never inspects the triggering event, so it follows a `workflow_dispatch` run — the repo's release workflow — as readily as a `push` one.
 
 The package ships no configuration.
-It had a `defaultMergeMethod` key while it wrapped release-please's pull requests; that went with the release tools (Refs #865).
 
 ## Testing
 

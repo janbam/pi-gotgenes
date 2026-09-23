@@ -15,6 +15,9 @@ hooks = [
 [[repos]]
 repo = "local"
 hooks = [
+    # Runs ahead of the formatters so a stray byte is reported where it is,
+    # rather than after Biome has reflowed the line around it (Refs #960).
+    { id = "invisible-characters", name = "invisible characters", entry = "node scripts/lint/invisible-characters.mjs --fix", language = "system", types = ["text"] },
     { id = "biome", name = "biome", entry = "pnpm exec biome check --write --files-ignore-unknown=true", language = "system", types_or = ["javascript", "jsx", "ts", "tsx", "json"] },
     { id = "eslint", name = "eslint", entry = "pnpm exec eslint --fix", language = "system", types = ["ts"], files = "^packages/" },
 ]

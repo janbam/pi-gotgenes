@@ -4,6 +4,8 @@ description: Push, verify CI, and dispatch the release (no issue to close)
 
 # Ship (no issue)
 
+Load the `git-workflow` and `releasing` skills before starting.
+
 ## 1. Sync with remote
 
 Before pushing, make sure local `HEAD` is current with the remote:

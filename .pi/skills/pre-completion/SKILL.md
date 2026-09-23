@@ -1,10 +1,8 @@
 ---
 name: pre-completion
 description: |
-  Pre-completion protocol for implementation agents — gather context, dispatch the
-  pre-completion-reviewer subagent, and handle its report before writing stage notes
-  and recommending /ship.
-  Load at the end of /tdd-plan and /build-plan after all implementation steps are complete.
+  Load at the end of `/tdd-plan` or `/build-plan`, after the last implementation step:
+  how to dispatch the `pre-completion-reviewer` and act on its PASS / WARN / FAIL.
 ---
 
 # Skill: pre-completion
@@ -29,6 +27,8 @@ Note:
 - The list of modified files.
 - The issue number (from the plan frontmatter `issue:` field or the plan filename pattern `NNNN-`).
 - The plan file path (`docs/plans/NNNN-*.md` or `packages/*/docs/plans/NNNN-*.md` matching the issue number; may be absent for unplanned work).
+- The **base ref** the reviewer's decision surface reads: the plan commit's parent (`<plan-commit>^`), or `$BASE` when there is no plan commit.
+  Resolve it to a SHA with `git rev-parse` rather than passing the `^` expression, so the reviewer runs one command with no shell quoting of its own.
 
 ## Step 2: Dispatch the reviewer
 
@@ -36,13 +36,14 @@ Dispatch the `pre-completion-reviewer` subagent via the `subagent` tool:
 
 - `subagent_type`: `"pre-completion-reviewer"`
 - `description`: `"Pre-completion review for issue #N"`
-- `prompt`: include the issue number, the modified-files list from Step 1, and the plan file path.
+- `prompt`: include the issue number, the modified-files list from Step 1, the plan file path, and the base ref.
 
 Example prompt to pass:
 
 ```text
 Review issue #236.
 Plan file: docs/plans/0236-pre-completion-reviewer.md
+Base ref: 4e6c3a7a
 Modified files since last tag:
   .pi/agents/pre-completion-reviewer.md
   .pi/skills/pre-completion/SKILL.md
@@ -51,7 +52,7 @@ Modified files since last tag:
   AGENTS.md
 ```
 
-When the change removes or narrows a guard, add a re-derivation mandate to the prompt: name the invariants to verify, and require the reviewer to enumerate its own candidate inputs rather than check the ones the tests already cover (Refs #803).
+When the change removes or narrows a guard, add a re-derivation mandate to the prompt: name the invariants to verify, and require the reviewer to enumerate its own candidate inputs rather than check the ones the tests already cover.
 
 Wait for the reviewer to complete and return its report before continuing.
 
@@ -66,7 +67,7 @@ Proceed to the "Summarize" step in the template.
 Include the one-line verdict in the stage notes ("Pre-completion reviewer: PASS").
 
 A PASS is scoped to the commit it reviewed.
-If substantive commits land afterward — not just the stage-notes commit — re-dispatch before recommending `/ship` (Refs #775).
+If substantive commits land afterward — not just the stage-notes commit — re-dispatch before recommending `/ship`.
 
 ### Overall: WARN
 
@@ -74,7 +75,8 @@ Proceed to "Summarize."
 Include the verdict and WARN findings in the stage notes under a "Reviewer warnings" line.
 The user can decide whether to address warnings before running `/ship`.
 
-When a WARN names stale references to a deleted symbol or module, grep the flagged file (and its sibling docs) exhaustively for every instance of that symbol before fixing — fixing only the named instances invites a second WARN round (Refs #441).
+When a WARN names stale references to a deleted symbol or module, grep the flagged file (and its sibling docs) exhaustively for every instance of that symbol before fixing — fixing only the named instances invites a second WARN round.
+After fixing WARN findings, re-dispatch scoped to the **delta** — name the new commits and the rounds already reviewed, as the FAIL path does.
 
 ### Overall: FAIL
 
@@ -87,4 +89,9 @@ Report the reviewer's "Fix required" block to the user and ask how to proceed:
 Do not proceed automatically — let the user decide.
 
 A finding in code the change never touched is a defect in the **record**, not a regression: correct the ADR or issue text, file or widen the follow-up, and offer that as the fix option.
-Scope the next dispatch to the delta — name the new commit and the rounds already reviewed (Refs #821).
+Scope the next dispatch to the delta — name the new commit and the rounds already reviewed.
+
+## A non-blocking observation can still be the issue's own defect
+
+The reviewer scopes findings against the plan, so "matches the plan's scoping, not a defect" is a claim about the plan, not about the issue.
+Check each non-blocking observation against the issue's reported symptom before accepting it (Refs #923).

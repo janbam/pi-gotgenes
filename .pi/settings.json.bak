@@ -1,6 +1,6 @@
 {
   "packages": [
-    "../packages/pi-colgrep/",
+    "../packages/pi-colgrep",
     "../packages/pi-github-tools",
     "../packages/pi-autoformat",
     "../packages/pi-permission-system",
@@ -29,6 +29,11 @@
     },
     { "source": "npm:@gotgenes/pi-subagents", "extensions": [], "skills": [] },
     {
+      "source": "npm:@gotgenes/pi-subagents-worktrees",
+      "extensions": [],
+      "skills": []
+    },
+    {
       "source": "npm:@gotgenes/pi-session-tools",
       "extensions": [],
       "skills": []
@@ -36,7 +41,6 @@
     { "source": "npm:@gotgenes/pi-nocd", "extensions": [], "skills": [] },
 
     "npm:pi-prompt-template-model",
-    "npm:pi-web-access",
     "npm:@eko24ive/pi-ask"
   ]
 }

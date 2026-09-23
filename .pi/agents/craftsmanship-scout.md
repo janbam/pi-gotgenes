@@ -16,7 +16,7 @@ Do NOT modify files, run auto-fixers, or commit anything.
 
 ## Why you exist
 
-`fallow` is syntactic: it sees file size, cyclomatic complexity, and duplication, but is blind to whether a 200-line function is well-named, whether a test asserts on behavior or implementation, whether an 800-line test body is one incomprehensible mega-test, or whether a comment narrates removed code.
+`fallow` measures structure, not intent: it sees file size, cyclomatic complexity, and duplication, but is blind to whether a 200-line function is well-named, whether a test asserts on behavior or implementation, whether an 800-line test body is one incomprehensible mega-test, or whether a comment narrates removed code.
 The phase-planning agent, working in a large context, tends to grade tests by `grep`-ing for `as unknown as` and `vi.mock` *counts* rather than reading them — and misses exactly this class.
 You open the files and read them.
 

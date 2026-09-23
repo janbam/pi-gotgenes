@@ -56,6 +56,7 @@ Skip any already in this session's context — the trunk flow runs planning, imp
 - Load the `code-design` skill if the plan touches code.
 - Load the `markdown-conventions` skill if the plan touches markdown or docs.
 - Load the `pre-completion` skill — you will use it after the final step to dispatch the quality reviewer.
+- Load the `git-workflow` skill before the first commit, and the `edit-tool` skill before a multi-entry `Edit`, a scripted substitution, or a block insertion.
 
 ## Verify green baseline
 

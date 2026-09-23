@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: amended by 0010
 date: 2026-09-08
 ---
 
@@ -7,7 +7,9 @@ date: 2026-09-08
 
 ## Status
 
-Accepted.
+Accepted, and amended by [ADR 0010], which moves the project-context block out of the portable identity: it names each context file by absolute path, so every child resolves its own against its own directory ([#918]).
+Amended 2026-09-18 ([#904]): the accepted residual recorded below is resolved — the generic base no longer asserts a capability set, so a child that falls back to it receives no claim its tool set may not hold.
+The decision itself is unchanged; only that consequence is.
 Extends [ADR 0006] and [ADR 0008], both of which stand: a child still inherits the parent prompt's identity region and nothing after it, and that region still guarantees shared parts rather than shared bytes.
 What this record adds is a second strategy for the case where inheriting the region is not merely worthless but harmful, and it settles what selects between them.
 
@@ -45,17 +47,18 @@ A second strategy, `portable`, is available and **off by default**, selected per
 
 ### The identity is the operator's own text
 
-A `portable` child's identity is composed from the parent's operator-authored prompt parts, in the order Pi's own `buildSystemPrompt` composes them: the custom prompt, the appended prompt, then the `<project_context>` block.
-The result is what Pi would assemble for a session with a custom prompt and no tools or skills.
+A `portable` child's identity is composed from the parent's operator-authored prompt parts, in the order Pi's own `buildSystemPrompt` composes them: the custom prompt, then the appended prompt.
+The result is what Pi would assemble for a session with a custom prompt and no tools, skills, or context files.
 
-Three of Pi's `BuildSystemPromptOptions` fields are excluded, each for a reason already settled:
+Four of Pi's `BuildSystemPromptOptions` fields are excluded, each for a reason already settled:
 
 - `skills` — the child loads its own catalogue ([ADR 0006]).
 - `promptGuidelines` — Pi derives it per session from the tools actually in the registry, so inheriting the parent's asserts guidance for tools the child may not hold.
   That is the defect [ADR 0008] removed with the `<sub_agent_context>` block.
 - `selectedTools` and `toolSnippets` — the tool surface is node-local prose ([its ADR 0014]).
-
-Context files are **included**, and load-bearing: `createSubagentSession` builds the child's loader with `noContextFiles: true`, so this is the only way a portable child sees project instructions at all.
+- `contextFiles` — the block names each file by absolute path, so it describes one directory rather than the operator's intent ([ADR 0010]).
+  This was originally included and load-bearing, because `createSubagentSession` builds the child's loader with `noContextFiles: true`.
+  The child still sees project instructions: the prompt builder appends the block for the child's **own** directory after the portable parts, in the position Pi composes it.
 
 ### The provider selects the strategy, not the agent
 
@@ -95,8 +98,9 @@ Opting into portable must never silently re-embed the harness base it exists to 
   This is defensive rather than reachable: Pi leaves the model unset only when no authenticated model exists at all, and such a parent cannot run a turn, emits no `before_agent_start`, and holds no capture to render.
 - This package now registers a `before_agent_start` handler, its first.
   It stores the capture and returns nothing, so [#901]'s planned handler extends it rather than competing with it.
-- **Accepted residual:** a portable child whose parent has no context files, custom prompt, or append prompt falls back to `genericBase`, which claims write and exec capability a read-only child does not hold.
-  Tracked as [#904].
+- A portable child whose parent has no custom prompt or append prompt falls back to `genericBase`.
+  This record originally accepted as a residual that the fallback claimed write and exec capability a read-only child does not hold; [#904] removed the claim, along with the role sentence that described one built-in agent type to every child.
+  Since [ADR 0010] such a child still receives its own directory's project instructions alongside that base: the fallback exists to keep Pi's preamble out of a re-homing harness, which a project-context block is no part of.
 - `pi-claude-bridge` is fixing the projection on its own side ([bridge#89]), which would resolve [#883] for bridge users specifically.
   `portable` remains the answer for any other re-homing host with no projection to fix.
 
@@ -108,6 +112,8 @@ The capability, the capture seam, and the fail-safe fallback are @georgeharker's
 [#883]: https://github.com/gotgenes/pi-packages/issues/883
 [#884]: https://github.com/gotgenes/pi-packages/pull/884
 [#890]: https://github.com/gotgenes/pi-packages/issues/890
+[#918]: https://github.com/gotgenes/pi-packages/issues/918
+[ADR 0010]: 0010-project-context-is-directory-resolved.md
 [#901]: https://github.com/gotgenes/pi-packages/issues/901
 [#904]: https://github.com/gotgenes/pi-packages/issues/904
 [ADR 0006]: 0006-inherited-prompt-is-identity-only.md

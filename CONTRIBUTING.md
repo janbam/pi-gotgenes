@@ -25,7 +25,7 @@ If so, the resulting commits carry `Co-authored-by:` for you, and the pull reque
 
 ## Conventions a change is held to
 
-[`AGENTS.md`](./AGENTS.md) is the full reference; these are the ones a change meets first.
+[`AGENTS.md`](./AGENTS.md) and the skills under [`.pi/skills/`](./.pi/skills/) are the full reference; these are the ones a change meets first.
 Prerequisites, setup, and the commands themselves are in the README's [Development](./README.md#development) section.
 
 | Convention            | What it means                                                                                                                          |
