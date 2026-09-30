@@ -54,6 +54,11 @@ export interface InheritedPrompt {
  *
  * Only the parent prompt's identity is inherited — see `inheritedIdentity`.
  *
+ * `config.noContextFiles: true` removes project context entirely: the
+ * inherited `<project_context>` block is cut and none is resolved for the
+ * child's directory. Omitted, the prompt is byte-identical to one built
+ * without the field.
+ *
  * @param inherited  The parent agent's effective system prompt and the cwd it names.
  * @param loadProjectContext  Resolves a directory's project instructions, for a
  *   child whose adopted identity carries none describing its own.
@@ -67,8 +72,15 @@ export function buildAgentPrompt(
 ): string {
   const header = buildPromptHeader(config.name, cwd, env);
 
-  const identity = inherited ? adoptedIdentity(inherited, cwd) : genericBase;
-  const projectContext = ownProjectContext(inherited, cwd, loadProjectContext);
+  // An agent that opts out of context files gets none from either source: not
+  // the parent's inherited block, and not one resolved for its own directory.
+  const noContextFiles = config.noContextFiles === true;
+  const identity = inherited
+    ? adoptedIdentity(inherited, cwd, noContextFiles)
+    : genericBase;
+  const projectContext = noContextFiles
+    ? ""
+    : ownProjectContext(inherited, cwd, loadProjectContext);
 
   if (config.promptMode === "append") {
     const customSection = config.systemPrompt.trim()
@@ -127,13 +139,20 @@ function ownProjectContext(
  * An absent or whitespace-only portable capture falls back to the generic base,
  * never to the full prompt: opting into portable must never silently re-embed
  * the harness base it exists to avoid.
+ *
+ * `noContextFiles` cuts the full identity at its project-context
+ * block even at the parent's directory; a portable identity never carries one.
  */
-function adoptedIdentity(inherited: InheritedPrompt, cwd: string): string {
+function adoptedIdentity(
+  inherited: InheritedPrompt,
+  cwd: string,
+  noContextFiles: boolean,
+): string {
   if (inherited.strategy !== "portable") {
     return inheritedIdentity(
       inherited.systemPrompt,
       inherited.cwd,
-      cwd !== inherited.cwd,
+      cwd !== inherited.cwd || noContextFiles,
     );
   }
   // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- || intentional: a whitespace-only capture must fall back too, which ?? would not do
@@ -221,7 +240,8 @@ const PROJECT_CONTEXT_LEAD_IN = "Project-specific instructions and guidelines:";
  * `cutProjectContext` extends the cut one layer earlier, to the
  * `<project_context>` block, for a child whose workspace is not its parent's
  * (#918). That block names each context file by absolute path, so an inherited
- * copy tells a relocated child its files live in the parent's checkout.
+ * copy tells a relocated child its files live in the parent's checkout. An
+ * agent declaring `no_context_files: true` takes the same cut.
  */
 function inheritedIdentity(
   prompt: string,
@@ -244,21 +264,38 @@ function inheritedIdentity(
  * naming a directory that merely shares a prefix with the parent's is not
  * mistaken for it, and it mirrors the separator normalization
  * `buildSystemPrompt` applies.
+ *
+ * With `cutProjectContext` and no cwd layer to anchor on — a `--no-cwd` parent
+ * writes none — the block is found by its first genuine opening instead.
+ * Everything after that opening is per-session anyway, so the cut stays sound,
+ * and an opted-out child never keeps the block silently.
  */
 function sessionResolvedTailStart(
   lines: readonly string[],
   parentCwd: string,
   cutProjectContext: boolean,
 ): number {
-  const tailAt = cwdAnchoredTailStart(lines, parentCwd);
-  if (!cutProjectContext || tailAt === -1) return tailAt;
-  const projectContextAt = projectContextStart(lines, tailAt);
-  return projectContextAt === -1 ? tailAt : projectContextAt;
+  const { at: tailAt, anchored } = cwdAnchoredTailStart(lines, parentCwd);
+  if (!cutProjectContext) return tailAt;
+  // With a cwd layer the positional search is authoritative, including its
+  // verdict that there is no block: a forward scan could then only match prose
+  // in the identity quoting Pi's opening and lead-in.
+  if (anchored) {
+    const blockAt = projectContextStart(lines, tailAt);
+    return blockAt === -1 ? tailAt : blockAt;
+  }
+  // No cwd layer: fall back to the first genuine opening above the tail.
+  const firstAt = firstProjectContextOpening(
+    lines,
+    tailAt === -1 ? lines.length : tailAt,
+  );
+  return firstAt === -1 ? tailAt : firstAt;
 }
 
 /**
  * Line index at which Pi's per-session layers begin, across both of its
- * prompt renderers, or -1 when none is present.
+ * prompt renderers, or -1 when none is present — plus whether a cwd layer
+ * anchored it, as opposed to the last-closing-tag guess.
  *
  * Through 0.85 the layers end in a `Current working directory:` footer line,
  * and the catalogue is anchored to it positionally. From 0.86 the prompt is
@@ -272,19 +309,21 @@ function sessionResolvedTailStart(
 function cwdAnchoredTailStart(
   lines: readonly string[],
   parentCwd: string,
-): number {
+): { at: number; anchored: boolean } {
   const footerAt = lines.lastIndexOf(
     `Current working directory: ${toPromptPath(parentCwd)}`,
   );
   if (footerAt !== -1) {
     const catalogueAt = skillsSectionStart(lines, footerAt);
-    return catalogueAt === -1 ? footerAt : catalogueAt;
+    return { at: catalogueAt === -1 ? footerAt : catalogueAt, anchored: true };
   }
   const cwdAt = cwdSectionStart(lines, parentCwd);
-  if (cwdAt !== -1) return skillsSectionWrapperStart(lines, cwdAt);
-  // Neither cwd layer: something downstream rewrote a 0.85-shaped prompt, and
-  // the last closing tag is the best remaining guess.
-  return skillsSectionStart(lines, -1);
+  if (cwdAt !== -1) {
+    return { at: skillsSectionWrapperStart(lines, cwdAt), anchored: true };
+  }
+  // Neither cwd layer: a `--no-cwd` parent, or something downstream rewrote a
+  // 0.85-shaped prompt; the last closing tag is the best remaining guess.
+  return { at: skillsSectionStart(lines, -1), anchored: false };
 }
 
 /**
@@ -359,14 +398,40 @@ function projectContextStart(lines: readonly string[], tailAt: number): number {
     openAt !== -1;
     openAt = lines.lastIndexOf(PROJECT_CONTEXT_OPEN, openAt - 1)
   ) {
-    if (
-      lines[openAt + 2] === PROJECT_CONTEXT_LEAD_IN ||
-      lines[openAt + 1] === PROJECT_CONTEXT_LEAD_IN
-    ) {
-      return openAt;
+    if (opensProjectContext(lines, openAt)) return openAt;
+  }
+  return -1;
+}
+
+/**
+ * Line index of the first project-context opening above `endAt` that carries
+ * Pi's lead-in, or -1 when there is none.
+ *
+ * First rather than last: Pi writes its block before anything a context file
+ * quotes, so a quoted opening inside the block can only come later.
+ */
+function firstProjectContextOpening(
+  lines: readonly string[],
+  endAt: number,
+): number {
+  for (let at = 0; at < endAt; at++) {
+    if (lines[at] === PROJECT_CONTEXT_OPEN && opensProjectContext(lines, at)) {
+      return at;
     }
   }
   return -1;
+}
+
+/**
+ * Whether the opening tag at `openAt` is followed by Pi's lead-in sentence —
+ * two lines below it through 0.85, one line from 0.86 (see
+ * `PROJECT_CONTEXT_LEAD_IN`).
+ */
+function opensProjectContext(lines: readonly string[], openAt: number): boolean {
+  return (
+    lines[openAt + 2] === PROJECT_CONTEXT_LEAD_IN ||
+    lines[openAt + 1] === PROJECT_CONTEXT_LEAD_IN
+  );
 }
 
 /**

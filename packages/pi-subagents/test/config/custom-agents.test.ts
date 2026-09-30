@@ -389,6 +389,21 @@ enabled: false
     expect(agent.enabled).toBe(false);
   });
 
+  it("reads no_context_files, defaulting to false", () => {
+    writeAgent("lean", `---
+no_context_files: true
+---
+`);
+    writeAgent("plain", `---
+description: Plain
+---
+`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("lean")!.noContextFiles).toBe(true);
+    expect(result.get("plain")!.noContextFiles).toBe(false);
+  });
+
   it("parses display_name frontmatter", () => {
     writeAgent("myagent", `---
 description: My Agent

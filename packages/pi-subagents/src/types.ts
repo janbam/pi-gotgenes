@@ -69,6 +69,13 @@ export interface AgentPromptConfig {
   name: string;
   promptMode: "replace" | "append";
   systemPrompt: string;
+  /**
+   * `true` keeps the `<project_context>` block (AGENTS.md, CLAUDE.md) out of
+   * the child's prompt: the inherited block is dropped and none is resolved
+   * for the child's own directory. Omitted means `false`, mirroring Pi's
+   * `--no-context-files`.
+   */
+  noContextFiles?: boolean;
 }
 
 /** Unified agent configuration — used for both default and user-defined agents. */

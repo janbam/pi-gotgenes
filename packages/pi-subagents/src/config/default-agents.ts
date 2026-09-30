@@ -33,7 +33,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       description: "Fast codebase exploration agent (read-only)",
       toolGuideline: "- Use Explore for codebase searches and code understanding.",
       toolNames: READ_ONLY_TOOLS,
-      model: "opencode-go/deepseek-v4-flash",
+      model: "opencode-go/deepseek-v4.1-flash",
       thinking: "high",
       systemPrompt: `# CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS
 You are a file search specialist. You excel at thoroughly navigating and exploring codebases.

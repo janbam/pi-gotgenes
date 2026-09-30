@@ -744,6 +744,34 @@ describe("buildAgentPrompt", () => {
         expect(prompt).not.toContain("<project_context>");
       });
 
+      it("cuts the block when the parent wrote no cwd layer", () => {
+        // A `--no-cwd` parent leaves nothing to anchor the tail on, so the
+        // cut falls back to Pi's own opening rather than keeping the block.
+        const prompt = buildAgentPrompt(replaceConfig(), "/workspace", env, {
+          systemPrompt: `${IDENTITY}\n\n${renderProjectContext(PARENT_CONTEXT) ?? ""}`,
+          cwd: PARENT_CWD,
+        });
+
+        expect(prompt.startsWith(IDENTITY)).toBe(true);
+        expect(prompt).not.toContain("<project_context>");
+        expect(prompt).not.toContain(`path="${PARENT_CWD}/AGENTS.md"`);
+      });
+
+      it("keeps identity prose quoting the opening when the parent has no block", () => {
+        // The cwd layer anchors the tail and no block sits above it, so the
+        // no-anchor fallback must not go hunting through the identity instead.
+        const quoting = `${IDENTITY}\n\nPi renders context files as:\n<project_context>\nProject-specific instructions and guidelines:\n</project_context>\n\nKeep this rule.`;
+        const prompt = buildAgentPrompt(replaceConfig(), "/workspace", env, {
+          systemPrompt: parentPrompt({
+            identity: quoting,
+            footerCwd: PARENT_CWD,
+          }),
+          cwd: PARENT_CWD,
+        });
+
+        expect(prompt.startsWith(quoting)).toBe(true);
+      });
+
       it("keeps the inherited block when the child shares the parent's cwd", () => {
         const prompt = buildAgentPrompt(replaceConfig(), PARENT_CWD, env, {
           systemPrompt: parentPrompt({
@@ -1135,6 +1163,166 @@ describe("buildAgentPrompt", () => {
         );
 
         expect(load).not.toHaveBeenCalled();
+      });
+    });
+
+    // `no_context_files: true` keeps AGENTS.md/CLAUDE.md out of a
+    // token-lean agent's prompt on every inheritance path, while everything
+    // else the identity carries — preamble, appended prompt — survives.
+    describe("no_context_files: true", () => {
+      /** Identity layers ahead of the block: Pi's preamble, then an APPEND_SYSTEM addendum. */
+      const IDENTITY_WITH_ADDENDUM = `${IDENTITY}\n\nAppended operator rules.`;
+
+      const PARENT_CONTEXT: ContextFile[] = [
+        { path: `${PARENT_CWD}/AGENTS.md`, content: "Repo rules." },
+      ];
+
+      /** A loader that would resolve the child's own block, were it consulted. */
+      function childLoader() {
+        return vi.fn((cwd: string) =>
+          renderProjectContext([{ path: `${cwd}/AGENTS.md`, content: "Worktree rules." }]),
+        );
+      }
+
+      function leanConfig(promptMode: "append" | "replace"): AgentConfig {
+        return {
+          ...(promptMode === "append" ? appendConfig() : replaceConfig()),
+          noContextFiles: true,
+        };
+      }
+
+      /** Both of Pi's prompt renderers, each carrying the parent's context block. */
+      const parentShapes = {
+        "pi ≤0.85 footer shape": parentPrompt({
+          identity: IDENTITY_WITH_ADDENDUM,
+          contextFiles: PARENT_CONTEXT,
+          skills: [skill("colgrep")],
+          footerCwd: PARENT_CWD,
+        }),
+        "pi ≥0.86 section shape": sectionParentPrompt({
+          identity: IDENTITY_WITH_ADDENDUM,
+          contextFiles: PARENT_CONTEXT,
+          skills: [skill("colgrep")],
+          cwd: PARENT_CWD,
+        }),
+        // A `--no-cwd` parent writes no cwd layer, so the positional anchor
+        // the relocated cut relies on is missing entirely.
+        "--no-cwd section shape": sectionParentPrompt({
+          identity: IDENTITY_WITH_ADDENDUM,
+          contextFiles: PARENT_CONTEXT,
+          skills: [skill("colgrep")],
+        }),
+        "--no-cwd section shape without skills": sectionParentPrompt({
+          identity: IDENTITY_WITH_ADDENDUM,
+          contextFiles: PARENT_CONTEXT,
+          extensionTail: "<permissions>\nExtension block.\n</permissions>",
+        }),
+      };
+
+      for (const [shape, systemPrompt] of Object.entries(parentShapes)) {
+        for (const promptMode of ["append", "replace"] as const) {
+          describe(`${shape}, ${promptMode} mode`, () => {
+            it("drops the inherited block for a child at the parent's cwd", () => {
+              const load = childLoader();
+              const prompt = buildAgentPrompt(
+                leanConfig(promptMode),
+                PARENT_CWD,
+                env,
+                { systemPrompt, cwd: PARENT_CWD },
+                load,
+              );
+
+              expect(prompt).not.toContain("<project_context>");
+              expect(prompt).not.toContain("Repo rules.");
+              // Identity ahead of the block survives byte for byte, addendum included.
+              expect(prompt.startsWith(IDENTITY_WITH_ADDENDUM)).toBe(true);
+              expect(load).not.toHaveBeenCalled();
+            });
+
+            it("resolves no block for a relocated child", () => {
+              const load = childLoader();
+              const prompt = buildAgentPrompt(
+                leanConfig(promptMode),
+                "/workspace",
+                env,
+                { systemPrompt, cwd: PARENT_CWD },
+                load,
+              );
+
+              expect(prompt).not.toContain("<project_context>");
+              expect(prompt).not.toContain("Worktree rules.");
+              expect(prompt.startsWith(IDENTITY_WITH_ADDENDUM)).toBe(true);
+              expect(load).not.toHaveBeenCalled();
+            });
+          });
+        }
+      }
+
+      it("resolves no block for a portable child", () => {
+        const load = childLoader();
+        const portable = "You are a specialist.\n\nAppended operator rules.";
+        const prompt = buildAgentPrompt(
+          leanConfig("append"),
+          PARENT_CWD,
+          env,
+          {
+            systemPrompt: parentShapes["pi ≥0.86 section shape"],
+            cwd: PARENT_CWD,
+            strategy: "portable",
+            portablePrompt: portable,
+          },
+          load,
+        );
+
+        expect(prompt).not.toContain("<project_context>");
+        expect(prompt.startsWith(portable)).toBe(true);
+        expect(load).not.toHaveBeenCalled();
+      });
+
+      it("keeps the per-call header and the agent's body", () => {
+        const prompt = buildAgentPrompt(leanConfig("replace"), PARENT_CWD, env, {
+          systemPrompt: parentShapes["pi ≥0.86 section shape"],
+          cwd: PARENT_CWD,
+        });
+
+        expect(prompt).toContain('<active_agent name="specialist"/>');
+        expect(prompt).toContain(`Working directory: ${PARENT_CWD}`);
+        expect(prompt.endsWith("You are a specialist.")).toBe(true);
+      });
+
+      // The default must not move the shared prefix: an explicit `false` builds
+      // exactly what a config without the field builds, on every path.
+      it("leaves prompts byte-identical when the field is false or omitted", () => {
+        const load = childLoader();
+        const cases: [string, Parameters<typeof buildAgentPrompt>[3]][] = [
+          [PARENT_CWD, { systemPrompt: parentShapes["pi ≥0.86 section shape"], cwd: PARENT_CWD }],
+          ["/workspace", { systemPrompt: parentShapes["pi ≥0.86 section shape"], cwd: PARENT_CWD }],
+          [
+            PARENT_CWD,
+            {
+              systemPrompt: parentShapes["pi ≥0.86 section shape"],
+              cwd: PARENT_CWD,
+              strategy: "portable",
+              portablePrompt: "You are a specialist.",
+            },
+          ],
+        ];
+
+        for (const [cwd, inherited] of cases) {
+          const omitted = buildAgentPrompt(replaceConfig(), cwd, env, inherited, load);
+          const explicit = buildAgentPrompt(
+            { ...replaceConfig(), noContextFiles: false },
+            cwd,
+            env,
+            inherited,
+            load,
+          );
+          expect(explicit).toBe(omitted);
+        }
+        // The same-cwd full child keeps the parent's block where the parent has it.
+        expect(
+          buildAgentPrompt(replaceConfig(), PARENT_CWD, env, cases[0][1], load),
+        ).toContain('path="/parent/AGENTS.md"');
       });
     });
   });
