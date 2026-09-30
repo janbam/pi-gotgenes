@@ -265,23 +265,26 @@ function inheritedIdentity(
  * mistaken for it, and it mirrors the separator normalization
  * `buildSystemPrompt` applies.
  *
- * With `cutProjectContext`, a block the positional search cannot place — a
- * `--no-cwd` parent writes no cwd layer to anchor on — is found by its first
- * genuine opening instead. Everything after that opening is per-session anyway,
- * so the cut stays sound, and an opted-out child never keeps the block silently.
+ * With `cutProjectContext` and no cwd layer to anchor on — a `--no-cwd` parent
+ * writes none — the block is found by its first genuine opening instead.
+ * Everything after that opening is per-session anyway, so the cut stays sound,
+ * and an opted-out child never keeps the block silently.
  */
 function sessionResolvedTailStart(
   lines: readonly string[],
   parentCwd: string,
   cutProjectContext: boolean,
 ): number {
-  const tailAt = cwdAnchoredTailStart(lines, parentCwd);
+  const { at: tailAt, anchored } = cwdAnchoredTailStart(lines, parentCwd);
   if (!cutProjectContext) return tailAt;
-  // Prefer the positional anchor: it cannot be fooled by prose ahead of the
-  // block that happens to quote Pi's opening and lead-in.
-  const anchoredAt = tailAt === -1 ? -1 : projectContextStart(lines, tailAt);
-  if (anchoredAt !== -1) return anchoredAt;
-  // No anchored block: fall back to the first genuine opening above the tail.
+  // With a cwd layer the positional search is authoritative, including its
+  // verdict that there is no block: a forward scan could then only match prose
+  // in the identity quoting Pi's opening and lead-in.
+  if (anchored) {
+    const blockAt = projectContextStart(lines, tailAt);
+    return blockAt === -1 ? tailAt : blockAt;
+  }
+  // No cwd layer: fall back to the first genuine opening above the tail.
   const firstAt = firstProjectContextOpening(
     lines,
     tailAt === -1 ? lines.length : tailAt,
@@ -291,7 +294,8 @@ function sessionResolvedTailStart(
 
 /**
  * Line index at which Pi's per-session layers begin, across both of its
- * prompt renderers, or -1 when none is present.
+ * prompt renderers, or -1 when none is present — plus whether a cwd layer
+ * anchored it, as opposed to the last-closing-tag guess.
  *
  * Through 0.85 the layers end in a `Current working directory:` footer line,
  * and the catalogue is anchored to it positionally. From 0.86 the prompt is
@@ -305,19 +309,21 @@ function sessionResolvedTailStart(
 function cwdAnchoredTailStart(
   lines: readonly string[],
   parentCwd: string,
-): number {
+): { at: number; anchored: boolean } {
   const footerAt = lines.lastIndexOf(
     `Current working directory: ${toPromptPath(parentCwd)}`,
   );
   if (footerAt !== -1) {
     const catalogueAt = skillsSectionStart(lines, footerAt);
-    return catalogueAt === -1 ? footerAt : catalogueAt;
+    return { at: catalogueAt === -1 ? footerAt : catalogueAt, anchored: true };
   }
   const cwdAt = cwdSectionStart(lines, parentCwd);
-  if (cwdAt !== -1) return skillsSectionWrapperStart(lines, cwdAt);
-  // Neither cwd layer: something downstream rewrote a 0.85-shaped prompt, and
-  // the last closing tag is the best remaining guess.
-  return skillsSectionStart(lines, -1);
+  if (cwdAt !== -1) {
+    return { at: skillsSectionWrapperStart(lines, cwdAt), anchored: true };
+  }
+  // Neither cwd layer: a `--no-cwd` parent, or something downstream rewrote a
+  // 0.85-shaped prompt; the last closing tag is the best remaining guess.
+  return { at: skillsSectionStart(lines, -1), anchored: false };
 }
 
 /**

@@ -757,6 +757,21 @@ describe("buildAgentPrompt", () => {
         expect(prompt).not.toContain(`path="${PARENT_CWD}/AGENTS.md"`);
       });
 
+      it("keeps identity prose quoting the opening when the parent has no block", () => {
+        // The cwd layer anchors the tail and no block sits above it, so the
+        // no-anchor fallback must not go hunting through the identity instead.
+        const quoting = `${IDENTITY}\n\nPi renders context files as:\n<project_context>\nProject-specific instructions and guidelines:\n</project_context>\n\nKeep this rule.`;
+        const prompt = buildAgentPrompt(replaceConfig(), "/workspace", env, {
+          systemPrompt: parentPrompt({
+            identity: quoting,
+            footerCwd: PARENT_CWD,
+          }),
+          cwd: PARENT_CWD,
+        });
+
+        expect(prompt.startsWith(quoting)).toBe(true);
+      });
+
       it("keeps the inherited block when the child shares the parent's cwd", () => {
         const prompt = buildAgentPrompt(replaceConfig(), PARENT_CWD, env, {
           systemPrompt: parentPrompt({
