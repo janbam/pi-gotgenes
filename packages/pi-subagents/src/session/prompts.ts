@@ -264,6 +264,11 @@ function inheritedIdentity(
  * naming a directory that merely shares a prefix with the parent's is not
  * mistaken for it, and it mirrors the separator normalization
  * `buildSystemPrompt` applies.
+ *
+ * With `cutProjectContext`, a block the positional search cannot place — a
+ * `--no-cwd` parent writes no cwd layer to anchor on — is found by its first
+ * genuine opening instead. Everything after that opening is per-session anyway,
+ * so the cut stays sound, and an opted-out child never keeps the block silently.
  */
 function sessionResolvedTailStart(
   lines: readonly string[],
@@ -271,9 +276,17 @@ function sessionResolvedTailStart(
   cutProjectContext: boolean,
 ): number {
   const tailAt = cwdAnchoredTailStart(lines, parentCwd);
-  if (!cutProjectContext || tailAt === -1) return tailAt;
-  const projectContextAt = projectContextStart(lines, tailAt);
-  return projectContextAt === -1 ? tailAt : projectContextAt;
+  if (!cutProjectContext) return tailAt;
+  // Prefer the positional anchor: it cannot be fooled by prose ahead of the
+  // block that happens to quote Pi's opening and lead-in.
+  const anchoredAt = tailAt === -1 ? -1 : projectContextStart(lines, tailAt);
+  if (anchoredAt !== -1) return anchoredAt;
+  // No anchored block: fall back to the first genuine opening above the tail.
+  const firstAt = firstProjectContextOpening(
+    lines,
+    tailAt === -1 ? lines.length : tailAt,
+  );
+  return firstAt === -1 ? tailAt : firstAt;
 }
 
 /**
@@ -379,14 +392,40 @@ function projectContextStart(lines: readonly string[], tailAt: number): number {
     openAt !== -1;
     openAt = lines.lastIndexOf(PROJECT_CONTEXT_OPEN, openAt - 1)
   ) {
-    if (
-      lines[openAt + 2] === PROJECT_CONTEXT_LEAD_IN ||
-      lines[openAt + 1] === PROJECT_CONTEXT_LEAD_IN
-    ) {
-      return openAt;
+    if (opensProjectContext(lines, openAt)) return openAt;
+  }
+  return -1;
+}
+
+/**
+ * Line index of the first project-context opening above `endAt` that carries
+ * Pi's lead-in, or -1 when there is none.
+ *
+ * First rather than last: Pi writes its block before anything a context file
+ * quotes, so a quoted opening inside the block can only come later.
+ */
+function firstProjectContextOpening(
+  lines: readonly string[],
+  endAt: number,
+): number {
+  for (let at = 0; at < endAt; at++) {
+    if (lines[at] === PROJECT_CONTEXT_OPEN && opensProjectContext(lines, at)) {
+      return at;
     }
   }
   return -1;
+}
+
+/**
+ * Whether the opening tag at `openAt` is followed by Pi's lead-in sentence —
+ * two lines below it through 0.85, one line from 0.86 (see
+ * `PROJECT_CONTEXT_LEAD_IN`).
+ */
+function opensProjectContext(lines: readonly string[], openAt: number): boolean {
+  return (
+    lines[openAt + 2] === PROJECT_CONTEXT_LEAD_IN ||
+    lines[openAt + 1] === PROJECT_CONTEXT_LEAD_IN
+  );
 }
 
 /**

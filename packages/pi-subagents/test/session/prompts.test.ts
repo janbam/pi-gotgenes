@@ -744,6 +744,19 @@ describe("buildAgentPrompt", () => {
         expect(prompt).not.toContain("<project_context>");
       });
 
+      it("cuts the block when the parent wrote no cwd layer", () => {
+        // A `--no-cwd` parent leaves nothing to anchor the tail on, so the
+        // cut falls back to Pi's own opening rather than keeping the block.
+        const prompt = buildAgentPrompt(replaceConfig(), "/workspace", env, {
+          systemPrompt: `${IDENTITY}\n\n${renderProjectContext(PARENT_CONTEXT) ?? ""}`,
+          cwd: PARENT_CWD,
+        });
+
+        expect(prompt.startsWith(IDENTITY)).toBe(true);
+        expect(prompt).not.toContain("<project_context>");
+        expect(prompt).not.toContain(`path="${PARENT_CWD}/AGENTS.md"`);
+      });
+
       it("keeps the inherited block when the child shares the parent's cwd", () => {
         const prompt = buildAgentPrompt(replaceConfig(), PARENT_CWD, env, {
           systemPrompt: parentPrompt({
@@ -1176,6 +1189,18 @@ describe("buildAgentPrompt", () => {
           contextFiles: PARENT_CONTEXT,
           skills: [skill("colgrep")],
           cwd: PARENT_CWD,
+        }),
+        // A `--no-cwd` parent writes no cwd layer, so the positional anchor
+        // the relocated cut relies on is missing entirely.
+        "--no-cwd section shape": sectionParentPrompt({
+          identity: IDENTITY_WITH_ADDENDUM,
+          contextFiles: PARENT_CONTEXT,
+          skills: [skill("colgrep")],
+        }),
+        "--no-cwd section shape without skills": sectionParentPrompt({
+          identity: IDENTITY_WITH_ADDENDUM,
+          contextFiles: PARENT_CONTEXT,
+          extensionTail: "<permissions>\nExtension block.\n</permissions>",
         }),
       };
 
