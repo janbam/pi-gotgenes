@@ -389,9 +389,9 @@ enabled: false
     expect(agent.enabled).toBe(false);
   });
 
-  it("reads include_context_files, defaulting to true", () => {
+  it("reads no_context_files, defaulting to false", () => {
     writeAgent("lean", `---
-include_context_files: false
+no_context_files: true
 ---
 `);
     writeAgent("plain", `---
@@ -400,8 +400,8 @@ description: Plain
 `);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.get("lean")!.includeContextFiles).toBe(false);
-    expect(result.get("plain")!.includeContextFiles).toBe(true);
+    expect(result.get("lean")!.noContextFiles).toBe(true);
+    expect(result.get("plain")!.noContextFiles).toBe(false);
   });
 
   it("parses display_name frontmatter", () => {

@@ -54,7 +54,7 @@ export interface InheritedPrompt {
  *
  * Only the parent prompt's identity is inherited — see `inheritedIdentity`.
  *
- * `config.includeContextFiles: false` removes project context entirely: the
+ * `config.noContextFiles: true` removes project context entirely: the
  * inherited `<project_context>` block is cut and none is resolved for the
  * child's directory. Omitted, the prompt is byte-identical to one built
  * without the field.
@@ -74,13 +74,13 @@ export function buildAgentPrompt(
 
   // An agent that opts out of context files gets none from either source: not
   // the parent's inherited block, and not one resolved for its own directory.
-  const includeContextFiles = config.includeContextFiles !== false;
+  const noContextFiles = config.noContextFiles === true;
   const identity = inherited
-    ? adoptedIdentity(inherited, cwd, includeContextFiles)
+    ? adoptedIdentity(inherited, cwd, noContextFiles)
     : genericBase;
-  const projectContext = includeContextFiles
-    ? ownProjectContext(inherited, cwd, loadProjectContext)
-    : "";
+  const projectContext = noContextFiles
+    ? ""
+    : ownProjectContext(inherited, cwd, loadProjectContext);
 
   if (config.promptMode === "append") {
     const customSection = config.systemPrompt.trim()
@@ -140,19 +140,19 @@ function ownProjectContext(
  * never to the full prompt: opting into portable must never silently re-embed
  * the harness base it exists to avoid.
  *
- * `includeContextFiles: false` cuts the full identity at its project-context
+ * `noContextFiles` cuts the full identity at its project-context
  * block even at the parent's directory; a portable identity never carries one.
  */
 function adoptedIdentity(
   inherited: InheritedPrompt,
   cwd: string,
-  includeContextFiles: boolean,
+  noContextFiles: boolean,
 ): string {
   if (inherited.strategy !== "portable") {
     return inheritedIdentity(
       inherited.systemPrompt,
       inherited.cwd,
-      cwd !== inherited.cwd || !includeContextFiles,
+      cwd !== inherited.cwd || noContextFiles,
     );
   }
   // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- || intentional: a whitespace-only capture must fall back too, which ?? would not do
@@ -241,7 +241,7 @@ const PROJECT_CONTEXT_LEAD_IN = "Project-specific instructions and guidelines:";
  * `<project_context>` block, for a child whose workspace is not its parent's
  * (#918). That block names each context file by absolute path, so an inherited
  * copy tells a relocated child its files live in the parent's checkout. An
- * agent declaring `include_context_files: false` takes the same cut.
+ * agent declaring `no_context_files: true` takes the same cut.
  */
 function inheritedIdentity(
   prompt: string,

@@ -1166,10 +1166,10 @@ describe("buildAgentPrompt", () => {
       });
     });
 
-    // `include_context_files: false` keeps AGENTS.md/CLAUDE.md out of a
+    // `no_context_files: true` keeps AGENTS.md/CLAUDE.md out of a
     // token-lean agent's prompt on every inheritance path, while everything
     // else the identity carries — preamble, appended prompt — survives.
-    describe("include_context_files: false", () => {
+    describe("no_context_files: true", () => {
       /** Identity layers ahead of the block: Pi's preamble, then an APPEND_SYSTEM addendum. */
       const IDENTITY_WITH_ADDENDUM = `${IDENTITY}\n\nAppended operator rules.`;
 
@@ -1187,7 +1187,7 @@ describe("buildAgentPrompt", () => {
       function leanConfig(promptMode: "append" | "replace"): AgentConfig {
         return {
           ...(promptMode === "append" ? appendConfig() : replaceConfig()),
-          includeContextFiles: false,
+          noContextFiles: true,
         };
       }
 
@@ -1290,9 +1290,9 @@ describe("buildAgentPrompt", () => {
         expect(prompt.endsWith("You are a specialist.")).toBe(true);
       });
 
-      // The default must not move the shared prefix: an explicit `true` builds
+      // The default must not move the shared prefix: an explicit `false` builds
       // exactly what a config without the field builds, on every path.
-      it("leaves prompts byte-identical when the field is true or omitted", () => {
+      it("leaves prompts byte-identical when the field is false or omitted", () => {
         const load = childLoader();
         const cases: [string, Parameters<typeof buildAgentPrompt>[3]][] = [
           [PARENT_CWD, { systemPrompt: parentShapes["pi ≥0.86 section shape"], cwd: PARENT_CWD }],
@@ -1311,7 +1311,7 @@ describe("buildAgentPrompt", () => {
         for (const [cwd, inherited] of cases) {
           const omitted = buildAgentPrompt(replaceConfig(), cwd, env, inherited, load);
           const explicit = buildAgentPrompt(
-            { ...replaceConfig(), includeContextFiles: true },
+            { ...replaceConfig(), noContextFiles: false },
             cwd,
             env,
             inherited,
