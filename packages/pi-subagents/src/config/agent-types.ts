@@ -114,7 +114,7 @@ export class AgentTypeRegistry implements AgentConfigLookup {
     return {
       name: type,
       displayName: "Agent",
-      description: "General-purpose agent for complex, multi-step tasks",
+      description: "Agent with all available tools and no built-in instructions",
       toolNames: BUILTIN_TOOL_NAMES,
       systemPrompt: "",
       promptMode: "append",

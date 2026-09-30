@@ -14,7 +14,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
     {
       name: "general-purpose",
       displayName: "Agent",
-      description: "General-purpose agent for complex, multi-step tasks",
+      description: "Agent with all available tools and no built-in instructions",
       toolGuideline: "- Use general-purpose for complex tasks that need file editing.",
       // toolNames omitted — means "all available tools" (resolved at lookup time)
       // inheritContext / runInBackground omitted — strategy fields, callers decide per-call.

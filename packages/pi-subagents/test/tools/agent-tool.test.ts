@@ -51,7 +51,7 @@ describe("AgentTool", () => {
 	it("derives type list from registry — includes default agents in description", () => {
 		const def = makeTool(createToolDeps()).toToolDefinition();
 		// testRegistry loads default agents: general-purpose, Explore, Plan
-		expect(def.description).toContain("- general-purpose: General-purpose agent");
+		expect(def.description).toContain("- general-purpose: Agent with all available tools and no built-in instructions");
 		expect(def.description).toContain("- Explore: Fast codebase exploration agent");
 	});
 
